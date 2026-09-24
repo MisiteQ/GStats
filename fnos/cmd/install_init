@@ -1,0 +1,14 @@
+#!/bin/bash
+
+### 安装前执行：检查运行环境依赖。
+
+export PATH=/var/apps/nodejs_v22/target/bin:${PATH}
+
+if ! command -v node >/dev/null 2>&1; then
+    # 依赖的运行时尚未就绪时，交给应用中心的依赖安装流程处理，
+    # 这里只记录日志，不阻断安装。
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - node runtime not ready (will be resolved by install_dep_apps)" \
+        >> "${TRIM_PKGVAR}/info.log" 2>/dev/null
+fi
+
+exit 0

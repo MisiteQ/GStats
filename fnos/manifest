@@ -1,0 +1,15 @@
+appname               = gstats
+version               = 1.0.1
+display_name          = GStats
+desc                  = GitHub 使用统计平台。登录自己的 GitHub 账号后浏览仓库与主页，系统自动记录每日登录人数、访问了哪些项目以及停留时长，并支持导出 CSV / JSON / HTML 报表。
+platform              = all
+source                = thirdparty
+maintainer            = Misite齊
+maintainer_url        = https://github.com/MisiteQ
+distributor           = Misite齊
+os_min_version        = 1.1.3100
+desktop_uidir         = ui
+desktop_applaunchname = gstats.main
+install_dep_apps      = nodejs_v22
+ctl_stop              = true
+checkport             = false

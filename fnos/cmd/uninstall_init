@@ -1,0 +1,11 @@
+#!/bin/bash
+
+### 卸载前执行：先停止服务。
+
+if [ -x "${TRIM_APPDEST}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop >> "${TRIM_PKGVAR}/info.log" 2>&1
+fi
+
+rm -f "${TRIM_APPDEST}/app.sock" 2>/dev/null
+
+exit 0

@@ -1,0 +1,18 @@
+#!/bin/bash
+
+### 应用设置变更后执行：把设置页中的参数写入应用配置，并重启服务使其生效。
+
+export PATH=/var/apps/nodejs_v22/target/bin:${PATH}
+
+SETUP_SCRIPT="${TRIM_APPDEST}/server/tools/apply-wizard.js"
+
+if command -v node >/dev/null 2>&1 && [ -f "${SETUP_SCRIPT}" ]; then
+    node "${SETUP_SCRIPT}" >> "${TRIM_PKGVAR}/info.log" 2>&1
+fi
+
+if [ -x "${TRIM_APPDEST}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop >> "${TRIM_PKGVAR}/info.log" 2>&1
+    "${TRIM_APPDEST}/cmd/main" start >> "${TRIM_PKGVAR}/info.log" 2>&1
+fi
+
+exit 0

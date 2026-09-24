@@ -1,0 +1,13 @@
+#!/bin/bash
+
+### 升级前执行：停止正在运行的服务，并备份现有配置。
+
+if [ -x "${TRIM_APPDEST}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop >> "${TRIM_PKGVAR}/info.log" 2>&1
+fi
+
+if [ -f "${TRIM_PKGETC}/config.json" ]; then
+    cp -f "${TRIM_PKGETC}/config.json" "${TRIM_PKGETC}/config.json.bak" 2>/dev/null
+fi
+
+exit 0

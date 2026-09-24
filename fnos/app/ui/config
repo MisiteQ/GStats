@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "gstats.main": {
+      "title": "GStats",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/gstats",
+      "gatewaySocket": "app.sock",
+      "url": "/app/gstats",
+      "allUsers": true
+    }
+  }
+}

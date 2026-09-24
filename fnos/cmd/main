@@ -1,0 +1,144 @@
+#!/bin/bash
+#
+# GStats —— 飞牛 fnOS 应用生命周期脚本
+# 负责 start / stop / status，应用通过统一网关 Unix Socket 对外提供服务。
+#
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+SERVER_DIR="${TRIM_APPDEST}/server"
+SOCKET_PATH="${TRIM_APPDEST}/app.sock"
+NODE_BIN_DIR="/var/apps/nodejs_v22/target/bin"
+
+export PATH="${NODE_BIN_DIR}:${PATH}"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" >> "${LOG_FILE}"
+}
+
+check_process() {
+    local pid="$1"
+    [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+read_pid() {
+    head -n 1 "${PID_FILE}" 2>/dev/null | tr -d '[:space:]'
+}
+
+status_process() {
+    if [ -f "${PID_FILE}" ]; then
+        local pid
+        pid="$(read_pid)"
+        if check_process "${pid}"; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+start_process() {
+    if status_process; then
+        log_msg "GStats is already running."
+        return 0
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        log_msg "ERROR: node runtime not found. PATH=${PATH}"
+        echo "未找到 Node.js 运行时，请先在应用中心安装 Node.js（nodejs_v22）。" > "${TRIM_TEMP_LOGFILE}"
+        return 1
+    fi
+
+    if [ ! -f "${SERVER_DIR}/server.js" ]; then
+        log_msg "ERROR: ${SERVER_DIR}/server.js is missing."
+        echo "应用文件不完整：缺少 ${SERVER_DIR}/server.js。" > "${TRIM_TEMP_LOGFILE}"
+        return 1
+    fi
+
+    # 运行期数据目录
+    mkdir -p "${TRIM_PKGVAR}/data" 2>/dev/null
+
+    # 启动前清理可能残留的 Socket
+    rm -f "${SOCKET_PATH}" 2>/dev/null
+
+    log_msg "Starting GStats (ver=${TRIM_APPVER}) ..."
+
+    cd "${SERVER_DIR}" || return 1
+    nohup node server.js >> "${LOG_FILE}" 2>&1 &
+    local pid=$!
+    printf "%s" "${pid}" > "${PID_FILE}"
+
+    # 等待服务把 Socket 建立起来（最多 20 秒）
+    local count=0
+    while [ "${count}" -lt 20 ]; do
+        if ! check_process "${pid}"; then
+            log_msg "GStats exited during startup, see ${LOG_FILE}"
+            rm -f "${PID_FILE}"
+            echo "GStats 启动失败，请查看日志：${LOG_FILE}" > "${TRIM_TEMP_LOGFILE}"
+            return 1
+        fi
+        if [ -S "${SOCKET_PATH}" ]; then
+            log_msg "GStats started, pid=${pid}, socket=${SOCKET_PATH}"
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+
+    log_msg "GStats started but socket not found after 20s, pid=${pid}"
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping GStats ..."
+
+    if [ ! -f "${PID_FILE}" ]; then
+        rm -f "${SOCKET_PATH}" 2>/dev/null
+        return 0
+    fi
+
+    local pid
+    pid="$(read_pid)"
+
+    if ! check_process "${pid}"; then
+        rm -f "${PID_FILE}" "${SOCKET_PATH}" 2>/dev/null
+        return 0
+    fi
+
+    kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1
+
+    local count=0
+    while check_process "${pid}" && [ "${count}" -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+
+    if check_process "${pid}"; then
+        log_msg "Force killing pid=${pid}"
+        kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1
+        sleep 1
+    fi
+
+    rm -f "${PID_FILE}" "${SOCKET_PATH}" 2>/dev/null
+    log_msg "GStats stopped."
+    return 0
+}
+
+case "$1" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status_process; then
+        exit 0
+    fi
+    exit 3
+    ;;
+*)
+    echo "Unknown command: $1" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+    ;;
+esac

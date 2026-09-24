@@ -1,0 +1,205 @@
+/* ==========================================================================
+   GStats 主题色
+   8 套配色：4 浅色 + 4 深色，全部通过 CSS 变量切换，互不依赖。
+   切换方式：<html data-theme="moonlight">
+   ========================================================================== */
+
+/* ------------------------------------------------------------------ 明月 · 天青 */
+[data-theme="moonlight"] {
+  color-scheme: light;
+  --bg: #f4f7fc;
+  --bg-grad: radial-gradient(1200px 520px at 12% -10%, #dbeafe 0%, transparent 62%),
+             radial-gradient(900px 480px at 100% 0%, #e0f2fe 0%, transparent 58%);
+  --panel: #ffffff;
+  --panel-2: #f8fafc;
+  --panel-3: #eef2f9;
+  --border: #e3e9f2;
+  --border-strong: #cfd9e8;
+  --text: #0d1b2e;
+  --text-2: #46586f;
+  --text-3: #8595ab;
+  --accent: #2563eb;
+  --accent-2: #38bdf8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --accent-text: #ffffff;
+  --success: #0f9d58;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --shadow: 0 1px 2px rgba(15, 40, 80, 0.05), 0 10px 30px -18px rgba(15, 40, 80, 0.22);
+  --chart-grid: #e6ecf5;
+}
+
+/* ------------------------------------------------------------------ 青竹 · 翠绿 */
+[data-theme="bamboo"] {
+  color-scheme: light;
+  --bg: #f3f8f4;
+  --bg-grad: radial-gradient(1200px 520px at 10% -12%, #d7f2e2 0%, transparent 60%),
+             radial-gradient(900px 480px at 100% 0%, #e8f7ee 0%, transparent 58%);
+  --panel: #ffffff;
+  --panel-2: #f7fbf8;
+  --panel-3: #edf5f0;
+  --border: #dfeae3;
+  --border-strong: #c9dccf;
+  --text: #11261b;
+  --text-2: #42604e;
+  --text-3: #7f9a8a;
+  --accent: #059669;
+  --accent-2: #34d399;
+  --accent-soft: rgba(5, 150, 105, 0.1);
+  --accent-text: #ffffff;
+  --success: #059669;
+  --warning: #ca8a04;
+  --danger: #dc2626;
+  --shadow: 0 1px 2px rgba(12, 50, 30, 0.05), 0 10px 30px -18px rgba(12, 50, 30, 0.22);
+  --chart-grid: #e2eee7;
+}
+
+/* ---------------------------------------------------------------- 紫藤 · 紫罗兰 */
+[data-theme="wisteria"] {
+  color-scheme: light;
+  --bg: #f8f6fd;
+  --bg-grad: radial-gradient(1200px 520px at 12% -10%, #ebe3fd 0%, transparent 60%),
+             radial-gradient(900px 480px at 100% 0%, #f3ebff 0%, transparent 58%);
+  --panel: #ffffff;
+  --panel-2: #faf8ff;
+  --panel-3: #f1ecfc;
+  --border: #e7e1f4;
+  --border-strong: #d5ccec;
+  --text: #1d1233;
+  --text-2: #5a4a7a;
+  --text-3: #9689b3;
+  --accent: #7c3aed;
+  --accent-2: #a78bfa;
+  --accent-soft: rgba(124, 58, 237, 0.1);
+  --accent-text: #ffffff;
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #e11d48;
+  --shadow: 0 1px 2px rgba(40, 20, 80, 0.05), 0 10px 30px -18px rgba(40, 20, 80, 0.24);
+  --chart-grid: #ebe5f7;
+}
+
+/* ------------------------------------------------------------------ 暖阳 · 琥珀 */
+[data-theme="sunrise"] {
+  color-scheme: light;
+  --bg: #fdf9f4;
+  --bg-grad: radial-gradient(1200px 520px at 12% -10%, #fdeacd 0%, transparent 60%),
+             radial-gradient(900px 480px at 100% 0%, #fdf0dd 0%, transparent 58%);
+  --panel: #ffffff;
+  --panel-2: #fefbf7;
+  --panel-3: #f9f0e4;
+  --border: #f0e5d6;
+  --border-strong: #e3d2bb;
+  --text: #2b1d0d;
+  --text-2: #6b5535;
+  --text-3: #a89373;
+  --accent: #d97706;
+  --accent-2: #fbbf24;
+  --accent-soft: rgba(217, 119, 6, 0.12);
+  --accent-text: #ffffff;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #dc2626;
+  --shadow: 0 1px 2px rgba(80, 50, 10, 0.05), 0 10px 30px -18px rgba(80, 50, 10, 0.24);
+  --chart-grid: #f2e8da;
+}
+
+/* ------------------------------------------------------------------ 深空 · 靛蓝 */
+[data-theme="deepspace"] {
+  color-scheme: dark;
+  --bg: #0a0f1e;
+  --bg-grad: radial-gradient(1200px 560px at 8% -14%, #1b2350 0%, transparent 62%),
+             radial-gradient(900px 500px at 100% 0%, #10203f 0%, transparent 58%);
+  --panel: #131a2f;
+  --panel-2: #182140;
+  --panel-3: #1e2a4d;
+  --border: #26314f;
+  --border-strong: #35446b;
+  --text: #eef2fb;
+  --text-2: #a9b6d4;
+  --text-3: #7b88ab;
+  --accent: #6366f1;
+  --accent-2: #818cf8;
+  --accent-soft: rgba(99, 102, 241, 0.18);
+  --accent-text: #ffffff;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -22px rgba(0, 0, 0, 0.8);
+  --chart-grid: #24304e;
+}
+
+/* ------------------------------------------------------------------ 青碧 · 湖蓝 */
+[data-theme="abyss"] {
+  color-scheme: dark;
+  --bg: #05121a;
+  --bg-grad: radial-gradient(1200px 560px at 10% -14%, #0d3a44 0%, transparent 62%),
+             radial-gradient(900px 500px at 100% 0%, #08222e 0%, transparent 58%);
+  --panel: #0c1d26;
+  --panel-2: #102631;
+  --panel-3: #14313e;
+  --border: #1c3b47;
+  --border-strong: #2a5261;
+  --text: #e6f7fb;
+  --text-2: #9dc2cd;
+  --text-3: #6f939f;
+  --accent: #06b6d4;
+  --accent-2: #22d3ee;
+  --accent-soft: rgba(6, 182, 212, 0.16);
+  --accent-text: #04141b;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -22px rgba(0, 0, 0, 0.8);
+  --chart-grid: #1b3b47;
+}
+
+/* ------------------------------------------------------------------ 夜幕 · 玫瑰 */
+[data-theme="nightfall"] {
+  color-scheme: dark;
+  --bg: #150a11;
+  --bg-grad: radial-gradient(1200px 560px at 10% -14%, #4a1430 0%, transparent 62%),
+             radial-gradient(900px 500px at 100% 0%, #2a0e20 0%, transparent 58%);
+  --panel: #21111c;
+  --panel-2: #2a1624;
+  --panel-3: #331b2c;
+  --border: #3b2133;
+  --border-strong: #553048;
+  --text: #fbeef5;
+  --text-2: #d0a7c9;
+  --text-3: #9d7291;
+  --accent: #f43f5e;
+  --accent-2: #fb7185;
+  --accent-soft: rgba(244, 63, 94, 0.16);
+  --accent-text: #ffffff;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -22px rgba(0, 0, 0, 0.8);
+  --chart-grid: #3a2032;
+}
+
+/* ------------------------------------------------------------------ 石墨 · 中性 */
+[data-theme="graphite"] {
+  color-scheme: dark;
+  --bg: #0e1013;
+  --bg-grad: radial-gradient(1200px 560px at 10% -14%, #22272e 0%, transparent 62%),
+             radial-gradient(900px 500px at 100% 0%, #171b21 0%, transparent 58%);
+  --panel: #16191e;
+  --panel-2: #1c2027;
+  --panel-3: #232830;
+  --border: #2a2f38;
+  --border-strong: #3b424e;
+  --text: #eef1f5;
+  --text-2: #a7b0bd;
+  --text-3: #79828f;
+  --accent: #94a3b8;
+  --accent-2: #cbd5e1;
+  --accent-soft: rgba(148, 163, 184, 0.16);
+  --accent-text: #10131a;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -22px rgba(0, 0, 0, 0.8);
+  --chart-grid: #262b34;
+}

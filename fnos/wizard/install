@@ -1,0 +1,139 @@
+[
+  {
+    "stepTitle": "GitHub 应用凭据",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "GStats 通过 GitHub OAuth 让用户登录自己的账号。请先访问 GitHub → Settings → Developer settings → OAuth Apps → New OAuth App，创建后把以下字段填进来。安装完成后也可在 GStats 的「设置」页随时修改。"
+      },
+      {
+        "type": "tips",
+        "helpText": "创建 OAuth App 时，Authorization callback URL 请填写：http://你的NAS地址/app/gstats/api/auth/github/callback"
+      },
+      {
+        "type": "text",
+        "field": "wizard_oauth_client_id",
+        "label": "GitHub OAuth Client ID",
+        "initValue": "",
+        "rules": [
+          {
+            "required": true,
+            "message": "请填写 OAuth App 的 Client ID"
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_oauth_client_secret",
+        "label": "GitHub OAuth Client Secret",
+        "initValue": "",
+        "rules": [
+          {
+            "required": true,
+            "message": "请填写 OAuth App 的 Client Secret"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_public_base_url",
+        "label": "对外访问地址（可选）",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^$|^https?://.+$",
+            "message": "请填写以 http:// 或 https:// 开头的完整地址，留空表示自动识别"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "stepTitle": "统计与数据",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_timezone",
+        "label": "统计时区",
+        "initValue": "Asia/Shanghai",
+        "rules": [
+          {
+            "required": true,
+            "message": "请填写时区，例如 Asia/Shanghai"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_retention_days",
+        "label": "明细数据保留天数",
+        "initValue": "365",
+        "rules": [
+          {
+            "pattern": "^[0-9]+$",
+            "message": "请填写数字天数"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "field": "wizard_allow_private_repos",
+        "label": "允许读取私有仓库",
+        "initValue": "false"
+      },
+      {
+        "type": "tips",
+        "helpText": "开启后申请 GitHub 的 repo 权限，用户可浏览自己的私有仓库；关闭时只读取公开信息，权限更小。"
+      }
+    ]
+  },
+  {
+    "stepTitle": "外观",
+    "items": [
+      {
+        "type": "select",
+        "field": "wizard_default_theme",
+        "label": "默认主题色",
+        "initValue": "auto",
+        "options": [
+          {
+            "label": "跟随系统",
+            "value": "auto"
+          },
+          {
+            "label": "明月（浅色·天青）",
+            "value": "moonlight"
+          },
+          {
+            "label": "青竹（浅色·翠绿）",
+            "value": "bamboo"
+          },
+          {
+            "label": "紫藤（浅色·紫罗兰）",
+            "value": "wisteria"
+          },
+          {
+            "label": "暖阳（浅色·琥珀）",
+            "value": "sunrise"
+          },
+          {
+            "label": "深空（深色·靛蓝）",
+            "value": "deepspace"
+          },
+          {
+            "label": "青碧（深色·湖蓝）",
+            "value": "abyss"
+          },
+          {
+            "label": "夜幕（深色·玫瑰）",
+            "value": "nightfall"
+          },
+          {
+            "label": "石墨（深色·中性）",
+            "value": "graphite"
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,23 @@
+# 依赖与工具
+node_modules/
+.tools/
+
+# 构建暂存与本地开发数据
+.build/
+.devdata/
+
+# 参考文档（体积较大，按需自行下载）
+.ref/
+
+# 开发期截图
+shots/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Agent 本地记忆（不入库）
+.workbuddy/

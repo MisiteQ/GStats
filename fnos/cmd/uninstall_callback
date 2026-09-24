@@ -1,0 +1,10 @@
+#!/bin/bash
+
+### 卸载清理后执行。
+### 说明：GStats 的用户用量数据保存在 TRIM_PKGVAR 中，默认不主动删除，
+### 以便重新安装后仍可恢复历史统计。如需彻底清理，可手动删除应用数据目录。
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - GStats uninstalled. User data kept at ${TRIM_PKGVAR}" \
+    >> "${TRIM_PKGVAR}/info.log" 2>/dev/null
+
+exit 0

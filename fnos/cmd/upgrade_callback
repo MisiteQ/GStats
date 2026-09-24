@@ -1,0 +1,13 @@
+#!/bin/bash
+
+### 升级完成后执行：保留运行数据，重新生成配置，服务由用户或系统再次启动。
+
+export PATH=/var/apps/nodejs_v22/target/bin:${PATH}
+
+SETUP_SCRIPT="${TRIM_APPDEST}/server/tools/apply-wizard.js"
+
+if command -v node >/dev/null 2>&1 && [ -f "${SETUP_SCRIPT}" ]; then
+    node "${SETUP_SCRIPT}" >> "${TRIM_PKGVAR}/info.log" 2>&1
+fi
+
+exit 0

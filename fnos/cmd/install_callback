@@ -1,0 +1,18 @@
+#!/bin/bash
+
+### 安装完成后执行：把安装向导中收集的参数落盘为应用配置。
+
+export PATH=/var/apps/nodejs_v22/target/bin:${PATH}
+
+SETUP_SCRIPT="${TRIM_APPDEST}/server/tools/apply-wizard.js"
+
+mkdir -p "${TRIM_PKGVAR}/data" 2>/dev/null
+
+if command -v node >/dev/null 2>&1 && [ -f "${SETUP_SCRIPT}" ]; then
+    node "${SETUP_SCRIPT}" >> "${TRIM_PKGVAR}/info.log" 2>&1
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - skip write config: node or ${SETUP_SCRIPT} missing" \
+        >> "${TRIM_PKGVAR}/info.log" 2>/dev/null
+fi
+
+exit 0
