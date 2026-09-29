@@ -2,14 +2,18 @@
 "use strict";
 
 /**
- * 开发用：生成一批演示数据（用户 + 近 30 天的登录与浏览记录），
- * 方便在本地预览看板、报表与各种图表效果。
+ * 开发用：生成一批演示数据（用户 + GitHub 仓库流量快照），
+ * 方便在本地预览概览看板、统计明细、报表与各种图表效果。
+ *
+ * 数据模型与 lib/store.js 的 traffic.json 一致：
+ *   users.json    用户与 GitHub 绑定关系
+ *   traffic.json  每日 PV/UV/克隆快照 + 来源网站/热门路径滚动快照 + 同步状态
  *
  * 用法：
  *   node tools/seed-demo.js                 # 写入 fnos/app/server/.devdata/var/data
  *   node tools/seed-demo.js <dataDir>       # 指定数据目录
  *
- * 注意：会覆盖目标目录下已有的 users.json 与 events.ndjson。
+ * 注意：会覆盖目标目录下已有的 users.json 与 traffic.json。
  */
 
 const fs = require("fs");
@@ -19,8 +23,9 @@ const targetDir =
   process.argv[2] || path.join(__dirname, "..", "fnos", "app", "server", ".devdata", "var", "data");
 
 const TIMEZONE = "Asia/Shanghai";
-const DAYS = 30;
+const DAYS = 90; // 生成 90 天的每日流量数据
 
+// --- 演示用户 ---
 const USERS = [
   {
     uid: "1000",
@@ -59,61 +64,66 @@ const USERS = [
       location: "Hangzhou",
       createdAt: "2020-06-11T00:00:00Z"
     }
-  },
-  {
-    uid: "1002",
-    fnosUsername: "liyan",
-    isAdmin: false,
-    github: {
-      id: 3,
-      login: "torvalds",
-      name: "Li Yan",
-      avatarUrl: "https://avatars.githubusercontent.com/u/3?v=4",
-      htmlUrl: "https://github.com/torvalds",
-      publicRepos: 7,
-      followers: 12,
-      following: 24,
-      bio: "",
-      company: "",
-      location: "",
-      createdAt: "2021-01-20T00:00:00Z"
-    }
-  },
-  {
-    uid: "1003",
-    fnosUsername: "wangfang",
-    isAdmin: false,
-    github: {
-      id: 4,
-      login: "gaearon",
-      name: "Wang Fang",
-      avatarUrl: "https://avatars.githubusercontent.com/u/4?v=4",
-      htmlUrl: "https://github.com/gaearon",
-      publicRepos: 25,
-      followers: 88,
-      following: 51,
-      bio: "",
-      company: "",
-      location: "Chengdu",
-      createdAt: "2018-09-05T00:00:00Z"
-    }
   }
 ];
 
-const REPOS = [
-  { target: "microsoft/vscode", kind: "repo", title: "Visual Studio Code", weight: 14 },
-  { target: "facebook/react", kind: "repo", title: "The library for web UIs", weight: 11 },
-  { target: "torvalds/linux", kind: "repo", title: "Linux kernel source tree", weight: 8 },
-  { target: "nodejs/node", kind: "repo", title: "Node.js JavaScript runtime", weight: 9 },
-  { target: "golang/go", kind: "repo", title: "The Go programming language", weight: 6 },
-  { target: "jellyfin/jellyfin", kind: "repo", title: "The Free Software Media System", weight: 7 },
-  { target: "NginxProxyManager/nginx-proxy-manager", kind: "repo", title: "Docker container for Nginx Proxy Manager", weight: 5 },
-  { target: "immich-app/immich", kind: "repo", title: "High performance self-hosted photo backup", weight: 6 },
-  { target: "home-assistant/core", kind: "repo", title: "Open source home automation", weight: 4 },
-  { target: "qdrant/qdrant", kind: "repo", title: "High-performance vector database", weight: 3 },
-  { target: "tailscale/tailscale", kind: "repo", title: "The easiest, most secure way to use WireGuard", weight: 5 },
-  { target: "@torvalds", kind: "profile", title: "torvalds 的个人主页", weight: 2 }
+// --- 每位用户的仓库列表 ---
+const USER_REPOS = {
+  "1000": [
+    "qixingkun/fnmonitor",
+    "qixingkun/gstats",
+    "qixingkun/dotfiles",
+    "qixingkun/homelab"
+  ],
+  "1001": [
+    "octocat/hello-world",
+    "octocat/awesome-project"
+  ]
+};
+
+// --- 来源网站候选 ---
+const REFERRER_POOL = [
+  { referrer: "github.com", weight: 30 },
+  { referrer: "google.com", weight: 20 },
+  { referrer: "stackoverflow.com", weight: 12 },
+  { referrer: "reddit.com", weight: 8 },
+  { referrer: "twitter.com", weight: 6 },
+  { referrer: "dev.to", weight: 5 },
+  { referrer: "juejin.cn", weight: 4 },
+  { referrer: "zhihu.com", weight: 3 },
+  { referrer: "Direct / None", weight: 10 }
 ];
+
+// --- 热门路径候选 ---
+const PATH_POOL = [
+  { path: "/", title: "Home", weight: 25 },
+  { path: "/README.md", title: "README", weight: 15 },
+  { path: "/issues", title: "Issues", weight: 10 },
+  { path: "/pulls", title: "Pull Requests", weight: 8 },
+  { path: "/wiki", title: "Wiki", weight: 5 },
+  { path: "/releases", title: "Releases", weight: 7 },
+  { path: "/actions", title: "Actions", weight: 4 },
+  { path: "/blob/main/README.md", title: "README.md", weight: 6 }
+];
+
+// --- 伪随机 ---
+let seed = 20260923;
+function rnd() {
+  seed = (seed * 1103515245 + 12345) % 2147483648;
+  return seed / 2147483648;
+}
+function randInt(min, max) {
+  return Math.floor(rnd() * (max - min + 1)) + min;
+}
+function pick(list) {
+  const total = list.reduce((s, i) => s + (i.weight || 1), 0);
+  let r = rnd() * total;
+  for (const item of list) {
+    r -= item.weight || 1;
+    if (r <= 0) return item;
+  }
+  return list[list.length - 1];
+}
 
 function dayKeyFor(date) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -127,36 +137,14 @@ function dayKeyFor(date) {
   return `${m.year}-${m.month}-${m.day}`;
 }
 
-/** 用固定种子的伪随机数，保证每次生成的数据一致 */
-let seed = 20260923;
-function rnd() {
-  seed = (seed * 1103515245 + 12345) % 2147483648;
-  return seed / 2147483648;
-}
-function pick(list) {
-  const total = list.reduce((s, i) => s + (i.weight || 1), 0);
-  let r = rnd() * total;
-  for (const item of list) {
-    r -= item.weight || 1;
-    if (r <= 0) return item;
-  }
-  return list[list.length - 1];
-}
-function randInt(min, max) {
-  return Math.floor(rnd() * (max - min + 1)) + min;
-}
-
-function newId(prefix, ts) {
-  return `${prefix}_${ts.toString(36)}${Math.floor(rnd() * 1e8).toString(36)}`;
-}
-
 function main() {
   fs.mkdirSync(targetDir, { recursive: true });
 
   const now = Date.now();
-  const events = [];
   const users = {};
-  const recentAppOpen = {};
+  const daily = [];
+  const refs = [];
+  const sync = {};
 
   for (const u of USERS) {
     users[u.uid] = {
@@ -166,108 +154,129 @@ function main() {
       github: u.github,
       token: "",
       authMethod: "oauth",
-      linkedAt: now - 40 * 86400000,
-      lastLoginAt: 0,
-      lastSeenAt: 0,
-      loginCount: 0
+      linkedAt: now - 90 * 86400000,
+      lastLoginAt: now - 2 * 86400000,
+      loginCount: randInt(15, 40)
     };
   }
 
-  // 每位用户每天的使用强度略有差异，让图表更真实
-  const activity = { "1000": 0.92, "1001": 0.62, "1002": 0.45, "1003": 0.78 };
-
-  for (let d = DAYS - 1; d >= 0; d--) {
-    const dayStart = new Date(now - d * 86400000);
-    const dayKey = dayKeyFor(dayStart);
-    const isWeekend = [0, 6].includes(new Date(dayKey + "T12:00:00").getDay());
-
-    for (const u of USERS) {
-      let chance = activity[u.uid] * (isWeekend ? 0.55 : 1);
-      if (d === 0) chance = Math.min(1, chance + 0.1);
-      if (rnd() > chance) continue;
-
-      const hour = randInt(9, 22);
-      const minute = randInt(0, 59);
-      const openTs = Date.parse(`${dayKey}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00+08:00`);
-      if (openTs > now) continue;
-
-      // 登录 / 打开应用
-      const isNewLogin = rnd() < 0.28;
-      events.push({
-        id: newId("evt", openTs),
-        ts: openTs,
-        day: dayKey,
-        type: "app_open",
-        uid: u.uid,
-        fnosUser: u.fnosUsername,
-        githubLogin: u.github.login,
-        agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
-      });
-      if (isNewLogin) {
-        users[u.uid].loginCount += 1;
-        users[u.uid].lastLoginAt = Math.max(users[u.uid].lastLoginAt, openTs);
-        events.push({
-          id: newId("evt", openTs + 1000),
-          ts: openTs + 1000,
-          day: dayKey,
-          type: "login",
-          uid: u.uid,
-          fnosUser: u.fnosUsername,
-          githubLogin: u.github.login,
-          agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
-        });
-      }
-      recentAppOpen[u.uid] = openTs;
-
-      // 浏览若干项目
-      const viewCount = randInt(1, 4);
-      let cursor = openTs + randInt(30, 200) * 1000;
-      for (let v = 0; v < viewCount; v++) {
-        const repo = pick(REPOS);
-        const seconds = Math.min(3600, Math.max(12, Math.round(90 + rnd() * 900)));
-        if (cursor + seconds * 1000 > now) break;
-        events.push({
-          id: newId("evt", cursor),
-          ts: cursor,
-          day: dayKey,
-          type: "view",
-          uid: u.uid,
-          fnosUser: u.fnosUsername,
-          githubLogin: u.github.login,
-          kind: repo.kind,
-          target: repo.target,
-          title: repo.title,
-          url: repo.kind === "repo" ? `https://github.com/${repo.target}` : `https://github.com/${repo.target.slice(1)}`,
-          seconds,
-          startedAt: cursor,
-          endedAt: cursor + seconds * 1000,
-          agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
-        });
-        cursor += seconds * 1000 + randInt(20, 300) * 1000;
-      }
-    }
-  }
-
   for (const u of USERS) {
-    const list = events.filter((e) => e.uid === u.uid);
-    if (list.length) {
-      users[u.uid].lastSeenAt = Math.max(...list.map((e) => e.ts));
-    }
-    if (!users[u.uid].lastLoginAt) {
-      users[u.uid].lastLoginAt = users[u.uid].linkedAt;
-    }
-  }
+    const repos = USER_REPOS[u.uid] || [];
+    const baseViews = u.uid === "1000" ? 35 : 15; // 活跃用户基线更高
 
-  events.sort((a, b) => a.ts - b.ts);
+    for (const repo of repos) {
+      // 每天生成 views + clones 数据
+      for (let d = DAYS - 1; d >= 0; d--) {
+        const dayStart = new Date(now - d * 86400000);
+        const dayKey = dayKeyFor(dayStart);
+        const dow = new Date(dayKey + "T12:00:00").getDay();
+        const isWeekend = dow === 0 || dow === 6;
+
+        // PV 有波动，周末略低
+        const views = Math.max(0, Math.round(baseViews * (isWeekend ? 0.6 : 1) * (0.5 + rnd())));
+        const viewUniques = Math.max(1, Math.round(views * (0.4 + rnd() * 0.3)));
+        const updatedAt = now - d * 86400000 + randInt(3600, 7200) * 1000;
+
+        daily.push({
+          uid: u.uid,
+          repo,
+          kind: "view",
+          day: dayKey,
+          count: views,
+          uniques: viewUniques,
+          updatedAt
+        });
+
+        // 克隆量约为浏览量的 15%-30%
+        const clones = Math.max(0, Math.round(views * (0.15 + rnd() * 0.15)));
+        const cloneUniques = Math.max(0, Math.round(clones * (0.5 + rnd() * 0.3)));
+        daily.push({
+          uid: u.uid,
+          repo,
+          kind: "clone",
+          day: dayKey,
+          count: clones,
+          uniques: cloneUniques,
+          updatedAt
+        });
+      }
+
+      // 生成来源网站快照（近 14 天滚动）
+      const referrers = [];
+      const refCount = randInt(5, 8);
+      for (let i = 0; i < refCount; i++) {
+        const r = pick(REFERRER_POOL);
+        referrers.push({
+          referrer: r.referrer,
+          count: randInt(5, 80),
+          uniques: randInt(2, 25)
+        });
+      }
+      // 去重（同名合并）
+      const refMap = {};
+      for (const r of referrers) {
+        if (!refMap[r.referrer]) refMap[r.referrer] = { referrer: r.referrer, count: 0, uniques: 0 };
+        refMap[r.referrer].count += r.count;
+        refMap[r.referrer].uniques += r.uniques;
+      }
+
+      // 生成热门路径快照
+      const paths = [];
+      const pathCount = randInt(5, 7);
+      for (let i = 0; i < pathCount; i++) {
+        const p = pick(PATH_POOL);
+        paths.push({
+          path: p.path,
+          title: p.title,
+          count: randInt(3, 60),
+          uniques: randInt(1, 20)
+        });
+      }
+      const pathMap = {};
+      for (const p of paths) {
+        if (!pathMap[p.path]) pathMap[p.path] = { path: p.path, title: p.title, count: 0, uniques: 0 };
+        pathMap[p.path].count += p.count;
+        pathMap[p.path].uniques += p.uniques;
+      }
+
+      refs.push({
+        uid: u.uid,
+        repo,
+        updatedAt: now - randInt(600, 3600) * 1000,
+        referrers: Object.values(refMap).sort((a, b) => b.count - a.count).slice(0, 10),
+        paths: Object.values(pathMap).sort((a, b) => b.count - a.count).slice(0, 10)
+      });
+    }
+
+    // 同步状态
+    sync[u.uid] = {
+      status: "ok",
+      startedAt: now - 300000,
+      finishedAt: now - 240000,
+      repoCount: repos.length,
+      okRepos: repos.length,
+      failedRepos: 0,
+      rateLimit: { remaining: 4900, limit: 5000, resetAt: now + 1800000 }
+    };
+  }
 
   fs.writeFileSync(path.join(targetDir, "users.json"), JSON.stringify(users, null, 2));
-  fs.writeFileSync(path.join(targetDir, "events.ndjson"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
 
-  const viewCount = events.filter((e) => e.type === "view").length;
-  const seconds = events.filter((e) => e.type === "view").reduce((s, e) => s + e.seconds, 0);
+  const trafficPayload = {
+    version: 1,
+    savedAt: now,
+    daily,
+    refs,
+    sync
+  };
+  fs.writeFileSync(path.join(targetDir, "traffic.json"), JSON.stringify(trafficPayload, null, 2));
+
+  const totalPV = daily.filter((d) => d.kind === "view").reduce((s, d) => s + d.count, 0);
+  const totalClones = daily.filter((d) => d.kind === "clone").reduce((s, d) => s + d.count, 0);
   console.log(`已生成演示数据 -> ${targetDir}`);
-  console.log(`  用户 ${USERS.length} 位，事件 ${events.length} 条（其中浏览记录 ${viewCount} 条）`);
-  console.log(`  累计浏览时长 ${Math.round(seconds / 3600)} 小时，覆盖 ${DAYS} 天`);
+  console.log(`  用户 ${USERS.length} 位，仓库 ${Object.values(USER_REPOS).flat().length} 个`);
+  console.log(`  每日流量记录 ${daily.length} 条，来源/路径快照 ${refs.length} 条`);
+  console.log(`  累计 PV ${totalPV}，累计克隆 ${totalClones}，覆盖 ${DAYS} 天`);
 }
 
 main();

@@ -8,9 +8,10 @@
  *   2. 已下载 fnpack（见 README），默认放在 .tools/fnpack.exe
  *
  * 用法：
- *   node tools/build.js                # 按 manifest 原样打包（platform=all）-> dist/gstats_<版本>_all.fpk
+ *   node tools/build.js                # 默认打包 x86 + ARM 两份
  *   node tools/build.js x86 arm        # 架构专用包 -> dist/gstats_<版本>_x86.fpk / gstats_<版本>_arm.fpk
- *   node tools/build.js all            # 只打通用包
+ *   node tools/build.js x86            # 只打 x86 包
+ *   node tools/build.js arm            # 只打 ARM 包
  *
  * 说明：fnpack 的产物文件名固定为 <appname>.fpk，架构与版本变体通过临时暂存目录
  * （.build/<arch>/fnos）改写 manifest 的 platform 字段后打包，再重命名为
@@ -25,7 +26,7 @@ const ROOT = path.join(__dirname, "..");
 const PACK_DIR = path.join(ROOT, "fnos");
 const DIST_DIR = path.join(ROOT, "dist");
 const STAGE_ROOT = path.join(ROOT, ".build");
-const ARCHES = ["all", "x86", "arm"];
+const ARCHES = ["x86", "arm"];
 
 /** 从 manifest 读取键值（manifest 为 key = value 文本格式） */
 function manifestField(text, key) {
@@ -106,12 +107,11 @@ function stageFor(arch) {
 
 /**
  * 打包一个架构变体。
- * arch = "all" 时直接打包 fnos/（不改写 manifest）；
+ * 通过暂存目录改写 manifest 的 platform 字段后打包，
  * 产物统一重命名为 <appname>_<version>_<arch>.fpk。
  */
 function buildArch(arch, fnpack, identity) {
-  const isDefault = arch === "all";
-  const source = isDefault ? PACK_DIR : stageFor(arch);
+  const source = stageFor(arch);
   const args = ["build", "--directory", source];
   console.log("\n[build] === " + arch + " ===");
   console.log("[build] " + path.basename(fnpack) + " " + args.join(" "));
@@ -128,7 +128,6 @@ function buildArch(arch, fnpack, identity) {
     fs.renameSync(raw, out);
     // 清理旧命名格式的残留产物，避免混淆
     fs.rmSync(path.join(DIST_DIR, "gstats-" + arch + ".fpk"), { force: true });
-    fs.rmSync(path.join(DIST_DIR, "gstats-all.fpk"), { force: true });
   }
   console.log("[build] 产物：" + out);
   return out;
@@ -150,7 +149,7 @@ function main() {
   const identity = readIdentity();
   console.log("[build] 应用：" + identity.appname + " v" + identity.version);
 
-  // 参数：未指定时默认打包 manifest 原样（platform=all） + x86 + arm 三份
+  // 参数：未指定时默认打包 x86 + ARM 两份
   const argv = process.argv.slice(2).filter((a) => !a.startsWith("-"));
   const targets = argv.length ? argv : ARCHES.slice();
   const invalid = targets.filter((a) => !ARCHES.includes(a));
@@ -158,8 +157,6 @@ function main() {
     console.error("[build] 不支持的架构：" + invalid.join(", ") + "（可选 " + ARCHES.join(" / ") + "）");
     process.exit(1);
   }
-  // 通用包产物名固定为 gstats.fpk，必须最后构建，避免被架构变体重命名时覆盖
-  targets.sort((a, b) => (a === "all" ? 1 : 0) - (b === "all" ? 1 : 0));
 
   fs.mkdirSync(DIST_DIR, { recursive: true });
 

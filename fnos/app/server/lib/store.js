@@ -1,34 +1,28 @@
 "use strict";
 
 /**
- * 数据层：用户、事件、浏览会话与统计聚合。
+ * 数据层：用户、GitHub 绑定关系、GitHub 仓库流量快照与聚合查询。
+ *
+ * 数据来源是 GitHub 官方 Repo Traffic API（外部访客数据），本系统不做任何
+ * 「谁在应用内看了什么」的埋点。同步任务定期抓取快照并落盘，从而积累
+ * GitHub 只保留 14 天以外的长期历史。
  *
  * 存储完全基于文件（无数据库依赖）：
- *   data/users.json          用户与 GitHub 绑定关系（token 为 AES-256-GCM 密文）
- *   data/events.ndjson       已完成的埋点事件，追加写入，按保留期裁剪
- *   data/open-sessions.json  进行中的浏览会话，用于进程异常退出后恢复
+ *   data/users.json    用户与 GitHub 绑定关系（token 为 AES-256-GCM 密文）
+ *   data/traffic.json  每日流量快照、来源/热门路径快照、同步状态
  */
 
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const util = require("./util");
 const config = require("./config");
 
-const EVENT_LOGIN = "login";
-const EVENT_APP_OPEN = "app_open";
-const EVENT_VIEW = "view";
+const KIND_VIEW = "view";
+const KIND_CLONE = "clone";
 
-const MAX_EVENTS_IN_MEMORY = 500000;
-const OPEN_SESSION_IDLE_MS = 180000; // 3 分钟无心跳则自动结算
-const APP_OPEN_DEDUPE_MS = 30 * 60 * 1000;
-
-function newId(prefix) {
-  return `${prefix}_${Date.now().toString(36)}${crypto.randomBytes(4).toString("hex")}`;
-}
-
-function setToArray(set) {
-  return Array.from(set || []);
+function repoOwner(repoFull) {
+  const i = String(repoFull || "").indexOf("/");
+  return i > 0 ? repoFull.slice(0, i) : "";
 }
 
 class Store {
@@ -36,27 +30,25 @@ class Store {
     this.cfg = cfg;
     this.dataDir = config.DATA_DIR;
     this.users = new Map();
-    this.events = [];
-    this.byDay = new Map();
-    this.openViews = new Map();
-    this.recentAppOpen = new Map(); // uid -> ts
-    this.dirtyOpen = false;
-    this.prunedSinceCompact = 0;
+
+    // 每日流量：key = uid\0repo\0kind\0day -> { uid, repo, kind, day, count, uniques, updatedAt }
+    this.trafficDaily = new Map();
+    // 来源/热门路径（GitHub 只提供近 14 天滚动数据）：key = uid\0repo -> snapshot
+    this.trafficRefs = new Map();
+    // 每个用户的同步状态：uid -> { status, startedAt, finishedAt, ... }
+    this.syncStatus = new Map();
+
     this.startedAt = Date.now();
   }
 
   /* ------------------------------------------------------------------ paths */
 
-  get eventsFile() {
-    return path.join(this.dataDir, "events.ndjson");
-  }
-
   get usersFile() {
     return path.join(this.dataDir, "users.json");
   }
 
-  get openFile() {
-    return path.join(this.dataDir, "open-sessions.json");
+  get trafficFile() {
+    return path.join(this.dataDir, "traffic.json");
   }
 
   get tz() {
@@ -68,9 +60,8 @@ class Store {
   init() {
     config.ensureDir(this.dataDir);
     this.loadUsers();
-    this.recoverOpenSessions();
-    this.loadEvents();
-    this.compactEvents();
+    this.loadTraffic();
+    this.purgeExpired();
   }
 
   loadUsers() {
@@ -101,124 +92,150 @@ class Store {
     }
   }
 
-  recoverOpenSessions() {
+  /* ------------------------------------------------------------- traffic io */
+
+  loadTraffic() {
     try {
-      const raw = fs.existsSync(this.openFile) ? fs.readFileSync(this.openFile, "utf8") : "";
-      const list = util.safeJsonParse(raw, []) || [];
-      for (const s of list) {
-        if (!s || !s.id) continue;
-        // 进程退出前没有正常 end 的会话，按最后一次心跳结算
-        const seconds = Math.max(0, Math.round(s.seconds || 0));
-        if (seconds > 0) {
-          this.pushEvent(this.buildViewEvent(s, seconds, s.lastHeartbeat || s.startedAt || Date.now()));
+      const raw = fs.existsSync(this.trafficFile) ? fs.readFileSync(this.trafficFile, "utf8") : "";
+      const parsed = util.safeJsonParse(raw, null);
+      if (!parsed) return;
+
+      for (const r of Array.isArray(parsed.daily) ? parsed.daily : []) {
+        if (!r || !r.uid || !r.repo || !r.day || ![KIND_VIEW, KIND_CLONE].includes(r.kind)) continue;
+        const key = this.dailyKey(r.uid, r.repo, r.kind, r.day);
+        this.trafficDaily.set(key, {
+          uid: String(r.uid),
+          repo: String(r.repo),
+          kind: r.kind,
+          day: r.day,
+          count: Number(r.count) || 0,
+          uniques: Number(r.uniques) || 0,
+          updatedAt: Number(r.updatedAt) || 0
+        });
+      }
+
+      for (const r of Array.isArray(parsed.refs) ? parsed.refs : []) {
+        if (!r || !r.uid || !r.repo) continue;
+        this.trafficRefs.set(this.refsKey(r.uid, r.repo), {
+          uid: String(r.uid),
+          repo: String(r.repo),
+          updatedAt: Number(r.updatedAt) || 0,
+          referrers: Array.isArray(r.referrers) ? r.referrers : [],
+          paths: Array.isArray(r.paths) ? r.paths : []
+        });
+      }
+
+      const sync = parsed.sync && typeof parsed.sync === "object" ? parsed.sync : {};
+      for (const [uid, s] of Object.entries(sync)) {
+        if (s && typeof s === "object") {
+          // 进程重启时把残留的 syncing 状态复位为失败
+          this.syncStatus.set(String(uid), { ...s, status: s.status === "syncing" ? "failed" : s.status });
         }
       }
-      if (list.length) this.compactEvents();
     } catch (e) {
-      console.error("[store] recoverOpenSessions failed:", e.message);
-    }
-    try {
-      fs.rmSync(this.openFile, { force: true });
-    } catch (e) {
-      /* ignore */
+      console.error("[store] loadTraffic failed:", e.message);
     }
   }
 
-  loadEvents() {
-    this.events = [];
-    this.byDay = new Map();
-    if (!fs.existsSync(this.eventsFile)) return;
+  persistTraffic() {
+    const payload = {
+      version: 1,
+      savedAt: Date.now(),
+      daily: Array.from(this.trafficDaily.values()),
+      refs: Array.from(this.trafficRefs.values()),
+      sync: Object.fromEntries(this.syncStatus.entries())
+    };
+    this.writeJsonAtomic(this.trafficFile, payload, 0o600);
+  }
 
-    let lines = [];
-    try {
-      lines = fs.readFileSync(this.eventsFile, "utf8").split("\n");
-    } catch (e) {
-      console.error("[store] loadEvents failed:", e.message);
-      return;
-    }
+  dailyKey(uid, repo, kind, day) {
+    return `${uid}\u0000${repo}\u0000${kind}\u0000${day}`;
+  }
 
-    const cutoffDay = util.addDays(util.dayKey(Date.now(), this.tz), -this.cfg.retentionDays);
-    let dropped = 0;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const evt = util.safeJsonParse(trimmed, null);
-      if (!evt || !evt.day) continue;
-      if (evt.day < cutoffDay) {
-        dropped += 1;
-        continue;
-      }
-      this.indexEvent(evt);
-    }
-    if (dropped) this.prunedSinceCompact += dropped;
-    if (this.events.length > MAX_EVENTS_IN_MEMORY) {
-      const overflow = this.events.length - MAX_EVENTS_IN_MEMORY;
-      this.events = this.events.slice(overflow);
-      this.prunedSinceCompact += overflow;
-      this.rebuildIndex();
-      console.warn(`[store] events exceed ${MAX_EVENTS_IN_MEMORY}, dropped ${overflow} oldest`);
+  refsKey(uid, repo) {
+    return `${uid}\u0000${repo}`;
+  }
+
+  /* ---------------------------------------------------------- traffic writes */
+
+  /** 写入/更新某仓库某天的流量数据（GitHub 会回填，取最新快照覆盖） */
+  upsertTrafficDay(uid, repo, kind, day, count, uniques, updatedAt) {
+    if (![KIND_VIEW, KIND_CLONE].includes(kind)) return;
+    if (!util.isDayString(day)) return;
+    const key = this.dailyKey(uid, repo, kind, day);
+    const prev = this.trafficDaily.get(key);
+    const next = {
+      uid: String(uid),
+      repo: String(repo),
+      kind,
+      day,
+      count: Number(count) || 0,
+      uniques: Number(uniques) || 0,
+      updatedAt: Number(updatedAt) || Date.now()
+    };
+    if (!prev || next.updatedAt >= prev.updatedAt || next.count >= prev.count) {
+      this.trafficDaily.set(key, next);
     }
   }
 
-  rebuildIndex() {
-    this.byDay = new Map();
-    for (const evt of this.events) this.indexEvent(evt, true);
-    this.events.sort((a, b) => a.ts - b.ts);
+  /** 覆盖某仓库的来源网站 / 热门路径快照 */
+  replaceTrafficRefs(uid, repo, referrers, paths, updatedAt) {
+    const cleanReferrers = (Array.isArray(referrers) ? referrers : [])
+      .filter((r) => r && r.referrer)
+      .slice(0, 30)
+      .map((r) => ({
+        referrer: util.safeString(r.referrer, 100),
+        count: Number(r.count) || 0,
+        uniques: Number(r.uniques) || 0
+      }));
+    const cleanPaths = (Array.isArray(paths) ? paths : [])
+      .filter((p) => p && p.path)
+      .slice(0, 30)
+      .map((p) => ({
+        path: util.safeString(p.path, 300),
+        title: util.safeString(p.title || p.path, 200),
+        count: Number(p.count) || 0,
+        uniques: Number(p.uniques) || 0
+      }));
+    this.trafficRefs.set(this.refsKey(uid, repo), {
+      uid: String(uid),
+      repo: String(repo),
+      updatedAt: Number(updatedAt) || Date.now(),
+      referrers: cleanReferrers,
+      paths: cleanPaths
+    });
   }
 
-  indexEvent(evt, skipPush) {
-    if (!skipPush) this.events.push(evt);
-    let bucket = this.byDay.get(evt.day);
-    if (!bucket) {
-      bucket = [];
-      this.byDay.set(evt.day, bucket);
-    }
-    bucket.push(evt);
+  setSyncStatus(uid, patch) {
+    const key = String(uid);
+    const prev = this.syncStatus.get(key) || {};
+    this.syncStatus.set(key, { ...prev, ...patch, uid: key });
   }
 
-  /* ------------------------------------------------------------------ events */
-
-  appendLine(evt) {
-    try {
-      fs.appendFileSync(this.eventsFile, JSON.stringify(evt) + "\n", { mode: 0o600 });
-    } catch (e) {
-      console.error("[store] append event failed:", e.message);
-    }
+  getSyncStatus(uid) {
+    return this.syncStatus.get(String(uid)) || null;
   }
 
-  pushEvent(evt) {
-    this.indexEvent(evt);
-    this.appendLine(evt);
-    return evt;
+  listSyncStatus(uid) {
+    if (uid) return this.syncStatus.get(String(uid)) ? [this.syncStatus.get(String(uid))] : [];
+    return Array.from(this.syncStatus.values());
   }
 
-  /** 定时压缩日志：把已裁剪的内容从文件中真正移除 */
-  compactEvents() {
-    if (this.prunedSinceCompact <= 0) return;
-    try {
-      const cutoffDay = util.addDays(util.dayKey(Date.now(), this.tz), -this.cfg.retentionDays);
-      const kept = this.events.filter((e) => e.day >= cutoffDay);
-      this.events = kept;
-      this.rebuildIndex();
-      const tmp = `${this.eventsFile}.tmp`;
-      const body = kept.map((e) => JSON.stringify(e)).join("\n");
-      fs.writeFileSync(tmp, body ? body + "\n" : "", { mode: 0o600 });
-      fs.renameSync(tmp, this.eventsFile);
-      this.prunedSinceCompact = 0;
-    } catch (e) {
-      console.error("[store] compact failed:", e.message);
-    }
+  isSyncing(uid) {
+    const s = this.syncStatus.get(String(uid));
+    return Boolean(s && s.status === "syncing");
   }
 
   purgeExpired() {
     const cutoffDay = util.addDays(util.dayKey(Date.now(), this.tz), -this.cfg.retentionDays);
-    const before = this.events.length;
-    this.events = this.events.filter((e) => e.day >= cutoffDay);
-    if (this.events.length !== before) {
-      this.prunedSinceCompact += before - this.events.length;
-      this.rebuildIndex();
-      this.compactEvents();
+    let changed = false;
+    for (const [key, r] of Array.from(this.trafficDaily.entries())) {
+      if (r.day < cutoffDay) {
+        this.trafficDaily.delete(key);
+        changed = true;
+      }
     }
+    if (changed) this.persistTraffic();
   }
 
   /* ------------------------------------------------------------------- users */
@@ -318,430 +335,224 @@ class Store {
     return this.users.get(String(uid)) || null;
   }
 
-  /* ------------------------------------------------------------------ 埋点 */
-
-  recordLogin(user, agent) {
+  /** 登录计数（仅记录账号自身的登录信息，不作为访客统计） */
+  recordLogin(user) {
     const now = Date.now();
     user.loginCount = (user.loginCount || 0) + 1;
     user.lastLoginAt = now;
     this.users.set(String(user.uid), user);
     this.saveUsers();
-    return this.pushEvent({
-      id: newId("evt"),
-      ts: now,
-      day: util.dayKey(now, this.tz),
-      type: EVENT_LOGIN,
-      uid: user.uid,
-      fnosUser: user.fnosUsername || "",
-      githubLogin: user.github ? user.github.login : "",
-      agent: util.safeString(agent, 200)
-    });
-  }
-
-  /** 打开应用（30 分钟内重复打开只记一次） */
-  recordAppOpen(user, agent) {
-    const now = Date.now();
-    const key = String(user.uid);
-    const last = this.recentAppOpen.get(key) || 0;
-    if (now - last < APP_OPEN_DEDUPE_MS) return null;
-    this.recentAppOpen.set(key, now);
-    return this.pushEvent({
-      id: newId("evt"),
-      ts: now,
-      day: util.dayKey(now, this.tz),
-      type: EVENT_APP_OPEN,
-      uid: user.uid,
-      fnosUser: user.fnosUsername || "",
-      githubLogin: user.github ? user.github.login : "",
-      agent: util.safeString(agent, 200)
-    });
-  }
-
-  /* -------------------------------------------------------------- 浏览会话 */
-
-  startView({ user, kind, target, title, url, agent }) {
-    const now = Date.now();
-    const id = newId("view");
-    const session = {
-      id,
-      uid: String(user.uid),
-      fnosUser: user.fnosUsername || "",
-      githubLogin: user.github ? user.github.login : "",
-      kind: util.safeString(kind, 32) || "page",
-      target: util.safeString(target, 200) || "unknown",
-      title: util.safeString(title, 200),
-      url: util.safeString(url, 500),
-      startedAt: now,
-      lastHeartbeat: now,
-      seconds: 0,
-      agent: util.safeString(agent, 200)
-    };
-    this.openViews.set(id, session);
-    this.dirtyOpen = true;
-    this.persistOpenSessions();
-    return session;
-  }
-
-  heartbeat(viewId, extra) {
-    const session = this.openViews.get(String(viewId));
-    if (!session) return null;
-    const now = Date.now();
-    // 单次心跳最多累计 120 秒，避免挂起页面把时长算高
-    const delta = Math.min(Math.max(0, Math.round((now - session.lastHeartbeat) / 1000)), 120);
-    session.seconds = Math.min(this.cfg.maxViewSeconds, session.seconds + delta);
-    session.lastHeartbeat = now;
-    if (extra && extra.title) session.title = util.safeString(extra.title, 200);
-    if (extra && extra.target) session.target = util.safeString(extra.target, 200);
-    this.dirtyOpen = true;
-    return session;
-  }
-
-  buildViewEvent(session, seconds, endedAt) {
-    const ts = session.startedAt || endedAt;
-    return {
-      id: newId("evt"),
-      ts,
-      day: util.dayKey(ts, this.tz),
-      type: EVENT_VIEW,
-      uid: session.uid,
-      fnosUser: session.fnosUser || "",
-      githubLogin: session.githubLogin || "",
-      kind: session.kind || "page",
-      target: session.target || "unknown",
-      title: session.title || session.target || "",
-      url: session.url || "",
-      seconds: Math.round(seconds || 0),
-      startedAt: session.startedAt,
-      endedAt,
-      agent: session.agent || ""
-    };
-  }
-
-  endView(viewId) {
-    const key = String(viewId);
-    const session = this.openViews.get(key);
-    if (!session) return null;
-    this.openViews.delete(key);
-    this.dirtyOpen = true;
-    // 结算时把最后一次心跳到现在的空档也算进去（上限 120 秒）
-    const now = Date.now();
-    const tail = Math.min(Math.max(0, Math.round((now - session.lastHeartbeat) / 1000)), 120);
-    const seconds = Math.min(this.cfg.maxViewSeconds, session.seconds + tail);
-    let evt = null;
-    if (seconds >= 1) {
-      evt = this.pushEvent(this.buildViewEvent(session, seconds, now));
-    }
-    this.persistOpenSessions();
-    return evt;
-  }
-
-  sweepIdle() {
-    const now = Date.now();
-    let changed = false;
-    for (const [id, session] of Array.from(this.openViews.entries())) {
-      if (now - session.lastHeartbeat > OPEN_SESSION_IDLE_MS) {
-        this.endView(id);
-        changed = true;
-      }
-    }
-    if (changed) this.persistOpenSessions();
-    return changed;
-  }
-
-  finalizeAll() {
-    for (const id of Array.from(this.openViews.keys())) this.endView(id);
-    this.persistOpenSessions();
-  }
-
-  persistOpenSessions() {
-    if (!this.dirtyOpen) return;
-    this.dirtyOpen = false;
-    const list = Array.from(this.openViews.values());
-    this.writeJsonAtomic(this.openFile, list, 0o600);
   }
 
   /* ------------------------------------------------------------------ 查询 */
 
-  /** 把进行中的会话折算成临时事件，保证「今日」数据实时 */
-  effectiveEvents(from, to, uid) {
-    const list = [];
-    for (const evt of this.events) {
-      if (evt.day < from || evt.day > to) continue;
-      if (uid && String(evt.uid) !== String(uid)) continue;
-      list.push(evt);
-    }
-    const now = Date.now();
-    for (const session of this.openViews.values()) {
-      if (uid && String(session.uid) !== String(uid)) continue;
-      const day = util.dayKey(session.startedAt, this.tz);
-      if (day < from || day > to) continue;
-      const extra = Math.min(Math.max(0, Math.round((now - session.lastHeartbeat) / 1000)), 120);
-      list.push(
-        this.buildViewEvent(session, Math.min(this.cfg.maxViewSeconds, session.seconds + extra), now)
-      );
-    }
-    return list;
+  matchUid(recordUid, uid) {
+    return !uid || String(recordUid) === String(uid);
   }
 
   /**
-   * 总览：按天的登录人数、活跃人数、浏览次数、浏览时长。
-   *
-   * 口径说明：
-   *   登录用户   —— 当日打开过 GStats（含完成 GitHub 授权）的去重用户数
-   *   活跃用户   —— 当日在 GStats 内真正浏览过至少一个项目的去重用户数
-   *   授权登录次数 —— 完成 GitHub 账号授权的次数
+   * 总览：按天汇总 GitHub 仓库外部访客流量。
+   * views/clones 可直接累加；uniques 是 GitHub 按单仓库、单天去重的值，
+   * 跨仓库/跨天只能累加（页面上明确标注为「每日 UV 累计」）。
    */
   overview(from, to, uid) {
     const days = util.dayRange(from, to).map((day) => ({
       day,
-      loginUsers: 0,
-      activeUsers: 0,
-      authLogins: 0,
-      logins: 0,
-      appOpens: 0,
       views: 0,
-      seconds: 0,
-      projects: 0
+      uniques: 0,
+      clones: 0,
+      cloneUniques: 0,
+      repos: 0
     }));
     const index = new Map(days.map((d) => [d.day, d]));
-    const loginSets = new Map();
-    const activeSets = new Map();
-    const projectSets = new Map();
+    const repoSets = new Map();
 
-    for (const evt of this.effectiveEvents(from, to, uid)) {
-      const row = index.get(evt.day);
+    for (const r of this.trafficDaily.values()) {
+      if (!this.matchUid(r.uid, uid)) continue;
+      const row = index.get(r.day);
       if (!row) continue;
-      const uidKey = String(evt.uid);
-
-      if (evt.type === EVENT_LOGIN) {
-        row.authLogins += 1;
-        row.logins += 1;
-        if (!loginSets.has(evt.day)) loginSets.set(evt.day, new Set());
-        loginSets.get(evt.day).add(uidKey);
-      } else if (evt.type === EVENT_APP_OPEN) {
-        row.appOpens += 1;
-        if (!loginSets.has(evt.day)) loginSets.set(evt.day, new Set());
-        loginSets.get(evt.day).add(uidKey);
-      } else if (evt.type === EVENT_VIEW) {
-        row.views += 1;
-        row.seconds += Math.round(evt.seconds || 0);
-        if (!activeSets.has(evt.day)) activeSets.set(evt.day, new Set());
-        activeSets.get(evt.day).add(uidKey);
-        if (!projectSets.has(evt.day)) projectSets.set(evt.day, new Set());
-        projectSets.get(evt.day).add(evt.target);
+      if (r.kind === KIND_VIEW) {
+        row.views += r.count;
+        row.uniques += r.uniques;
+        if (!repoSets.has(r.day)) repoSets.set(r.day, new Set());
+        repoSets.get(r.day).add(r.repo);
+      } else if (r.kind === KIND_CLONE) {
+        row.clones += r.count;
+        row.cloneUniques += r.uniques;
       }
     }
 
     const totals = {
-      loginUsers: 0,
-      activeUsers: 0,
-      avgDailyLoginUsers: 0,
-      authLogins: 0,
-      logins: 0,
-      appOpens: 0,
       views: 0,
-      seconds: 0,
-      projects: 0,
-      avgSecondsPerView: 0,
+      uniques: 0,
+      avgDailyViews: 0,
+      avgDailyUniques: 0,
+      clones: 0,
+      cloneUniques: 0,
+      repos: 0,
+      avgViewsPerRepo: 0,
       days: days.length
     };
-    const allLoginUsers = new Set();
-    const allActiveUsers = new Set();
-    const allProjects = new Set();
-    let loginDaySum = 0;
+    const allRepos = new Set();
 
     for (const row of days) {
-      const loginSet = loginSets.get(row.day) || new Set();
-      const activeSet = activeSets.get(row.day) || new Set();
-      row.loginUsers = loginSet.size;
-      row.activeUsers = activeSet.size;
-      row.projects = (projectSets.get(row.day) || new Set()).size;
-
-      loginDaySum += row.loginUsers;
-      for (const u of loginSet) allLoginUsers.add(u);
-      for (const u of activeSet) allActiveUsers.add(u);
-      for (const p of projectSets.get(row.day) || []) allProjects.add(p);
-
-      totals.logins += row.logins;
-      totals.authLogins += row.authLogins;
-      totals.appOpens += row.appOpens;
+      const set = repoSets.get(row.day) || new Set();
+      row.repos = set.size;
       totals.views += row.views;
-      totals.seconds += row.seconds;
+      totals.uniques += row.uniques;
+      totals.clones += row.clones;
+      totals.cloneUniques += row.cloneUniques;
+      for (const repo of set) allRepos.add(repo);
     }
 
-    totals.seconds = Math.round(totals.seconds);
-    totals.loginUsers = allLoginUsers.size;
-    totals.activeUsers = allActiveUsers.size;
-    totals.projects = allProjects.size;
-    totals.avgDailyLoginUsers = days.length ? Number((loginDaySum / days.length).toFixed(2)) : 0;
-    totals.avgSecondsPerView = totals.views ? Math.round(totals.seconds / totals.views) : 0;
-    totals.avgSecondsPerDay = days.length ? Math.round(totals.seconds / days.length) : 0;
+    totals.repos = allRepos.size;
+    totals.avgDailyViews = days.length ? Number((totals.views / days.length).toFixed(2)) : 0;
+    totals.avgDailyUniques = days.length ? Number((totals.uniques / days.length).toFixed(2)) : 0;
+    totals.avgViewsPerRepo = totals.repos ? Math.round(totals.views / totals.repos) : 0;
     return { days, totals };
   }
 
-  /** 项目维度：哪些项目被看、被谁看、看了多久 */
-  projects(from, to, uid) {
+  /** 仓库维度：每个仓库在区间内的外部访问量 / 克隆量 */
+  repos(from, to, uid) {
     const map = new Map();
-    for (const evt of this.effectiveEvents(from, to, uid)) {
-      if (evt.type !== EVENT_VIEW) continue;
-      const key = evt.target || "unknown";
-      let item = map.get(key);
+    for (const r of this.trafficDaily.values()) {
+      if (!this.matchUid(r.uid, uid)) continue;
+      if (r.day < from || r.day > to) continue;
+      let item = map.get(r.repo);
       if (!item) {
         item = {
-          target: key,
-          kind: evt.kind || "repo",
-          title: evt.title || key,
-          users: new Set(),
-          userList: new Set(),
+          repo: r.repo,
+          owner: repoOwner(r.repo),
+          uid: r.uid,
           views: 0,
-          seconds: 0,
-          firstAt: evt.ts,
-          lastAt: evt.ts
-        };
-        map.set(key, item);
-      }
-      item.users.add(String(evt.uid));
-      if (evt.githubLogin) item.userList.add(evt.githubLogin);
-      item.views += 1;
-      item.seconds += Math.round(evt.seconds || 0);
-      if (evt.ts < item.firstAt) item.firstAt = evt.ts;
-      if (evt.ts > item.lastAt) {
-        item.lastAt = evt.ts;
-        if (evt.title) item.title = evt.title;
-      }
-    }
-    return Array.from(map.values())
-      .map((item) => ({
-        target: item.target,
-        kind: item.kind,
-        title: item.title,
-        users: item.users.size,
-        userList: setToArray(item.userList),
-        views: item.views,
-        seconds: Math.round(item.seconds),
-        avgSeconds: item.views ? Math.round(item.seconds / item.views) : 0,
-        firstAt: item.firstAt,
-        lastAt: item.lastAt
-      }))
-      .sort((a, b) => b.seconds - a.seconds || b.views - a.views);
-  }
-
-  /** 用户维度明细 */
-  users(from, to) {
-    const map = new Map();
-    for (const evt of this.effectiveEvents(from, to, null)) {
-      const key = String(evt.uid);
-      let item = map.get(key);
-      if (!item) {
-        const known = this.users.get(key);
-        item = {
-          uid: key,
-          fnosUser: evt.fnosUser || (known ? known.fnosUsername : ""),
-          githubLogin:
-            evt.githubLogin || (known && known.github ? known.github.login : ""),
-          avatarUrl: known && known.github ? known.github.avatarUrl : "",
+          uniques: 0,
+          clones: 0,
+          cloneUniques: 0,
           days: new Set(),
-          logins: 0,
-          appOpens: 0,
-          views: 0,
-          seconds: 0,
-          projects: new Set(),
-          firstAt: evt.ts,
-          lastAt: evt.ts
+          firstDay: r.day,
+          lastDay: r.day
         };
-        map.set(key, item);
+        map.set(r.repo, item);
       }
-      item.days.add(evt.day);
-      if (evt.type === EVENT_LOGIN) item.logins += 1;
-      if (evt.type === EVENT_APP_OPEN) item.appOpens += 1;
-      if (evt.type === EVENT_VIEW) {
-        item.views += 1;
-        item.seconds += Math.round(evt.seconds || 0);
-        item.projects.add(evt.target);
+      if (r.kind === KIND_VIEW) {
+        item.views += r.count;
+        item.uniques += r.uniques;
+        item.days.add(r.day);
+        if (r.day < item.firstDay) item.firstDay = r.day;
+        if (r.day > item.lastDay) item.lastDay = r.day;
+      } else if (r.kind === KIND_CLONE) {
+        item.clones += r.count;
+        item.cloneUniques += r.uniques;
       }
-      if (evt.ts < item.firstAt) item.firstAt = evt.ts;
-      if (evt.ts > item.lastAt) item.lastAt = evt.ts;
     }
     return Array.from(map.values())
       .map((item) => ({
-        uid: item.uid,
-        fnosUser: item.fnosUser,
-        githubLogin: item.githubLogin,
-        avatarUrl: item.avatarUrl,
-        activeDays: item.days.size,
-        logins: item.logins,
-        appOpens: item.appOpens,
+        repo: item.repo,
+        owner: item.owner,
         views: item.views,
-        seconds: Math.round(item.seconds),
-        projectCount: item.projects.size,
-        firstAt: item.firstAt,
-        lastAt: item.lastAt
+        uniques: item.uniques,
+        clones: item.clones,
+        cloneUniques: item.cloneUniques,
+        activeDays: item.days.size,
+        avgDailyViews: item.days.size ? Number((item.views / item.days.size).toFixed(2)) : 0,
+        firstDay: item.firstDay,
+        lastDay: item.lastDay
       }))
-      .sort((a, b) => b.seconds - a.seconds);
+      .sort((a, b) => b.views - a.views || b.clones - a.clones);
   }
 
-  /** 用户 × 项目交叉明细 */
-  userProjects(from, to, uid) {
+  /** 来源网站：聚合各仓库最新一份近 14 天快照 */
+  referrers(uid) {
     const map = new Map();
-    for (const evt of this.effectiveEvents(from, to, uid)) {
-      if (evt.type !== EVENT_VIEW) continue;
-      const key = `${evt.uid}::${evt.target}`;
-      let item = map.get(key);
-      if (!item) {
-        const known = this.users.get(String(evt.uid));
-        item = {
-          uid: String(evt.uid),
-          fnosUser: evt.fnosUser || (known ? known.fnosUsername : ""),
-          githubLogin: evt.githubLogin || (known && known.github ? known.github.login : ""),
-          target: evt.target,
-          kind: evt.kind || "repo",
-          title: evt.title || evt.target,
-          days: new Set(),
-          views: 0,
-          seconds: 0,
-          lastAt: evt.ts
-        };
-        map.set(key, item);
+    let latestUpdatedAt = 0;
+    for (const snap of this.trafficRefs.values()) {
+      if (!this.matchUid(snap.uid, uid)) continue;
+      latestUpdatedAt = Math.max(latestUpdatedAt, snap.updatedAt);
+      for (const r of snap.referrers) {
+        let item = map.get(r.referrer);
+        if (!item) {
+          item = { referrer: r.referrer, count: 0, uniques: 0, repos: new Set() };
+          map.set(r.referrer, item);
+        }
+        item.count += r.count;
+        item.uniques += r.uniques;
+        item.repos.add(snap.repo);
       }
-      item.days.add(evt.day);
-      item.views += 1;
-      item.seconds += Math.round(evt.seconds || 0);
-      if (evt.ts > item.lastAt) item.lastAt = evt.ts;
     }
-    return Array.from(map.values())
-      .map((item) => ({
-        uid: item.uid,
-        fnosUser: item.fnosUser,
-        githubLogin: item.githubLogin,
-        target: item.target,
-        kind: item.kind,
-        title: item.title,
-        activeDays: item.days.size,
-        views: item.views,
-        seconds: Math.round(item.seconds),
-        avgSeconds: item.views ? Math.round(item.seconds / item.views) : 0,
-        lastAt: item.lastAt
-      }))
-      .sort((a, b) => b.seconds - a.seconds);
+    return {
+      updatedAt: latestUpdatedAt,
+      rows: Array.from(map.values())
+        .map((item) => ({
+          referrer: item.referrer,
+          count: item.count,
+          uniques: item.uniques,
+          repoCount: item.repos.size
+        }))
+        .sort((a, b) => b.count - a.count)
+    };
   }
 
-  rawEvents(from, to, uid, limit = 1000) {
-    const list = this.effectiveEvents(from, to, uid)
-      .filter((e) => e.type === EVENT_VIEW)
-      .sort((a, b) => b.ts - a.ts)
-      .slice(0, limit);
-    return list;
+  /** 热门访问路径：聚合各仓库最新一份近 14 天快照 */
+  paths(uid) {
+    const map = new Map();
+    let latestUpdatedAt = 0;
+    for (const snap of this.trafficRefs.values()) {
+      if (!this.matchUid(snap.uid, uid)) continue;
+      latestUpdatedAt = Math.max(latestUpdatedAt, snap.updatedAt);
+      for (const p of snap.paths) {
+        let item = map.get(p.path);
+        if (!item) {
+          item = { path: p.path, title: p.title, count: 0, uniques: 0, repos: new Set() };
+          map.set(p.path, item);
+        }
+        item.count += p.count;
+        item.uniques += p.uniques;
+        item.repos.add(snap.repo);
+        if (!item.title && p.title) item.title = p.title;
+      }
+    }
+    return {
+      updatedAt: latestUpdatedAt,
+      rows: Array.from(map.values())
+        .map((item) => ({
+          path: item.path,
+          title: item.title || item.path,
+          count: item.count,
+          uniques: item.uniques,
+          repoCount: item.repos.size
+        }))
+        .sort((a, b) => b.count - a.count)
+    };
+  }
+
+  /** 是否存在任何流量数据（用于空状态引导） */
+  hasTraffic(uid) {
+    for (const r of this.trafficDaily.values()) {
+      if (r.kind === KIND_VIEW && this.matchUid(r.uid, uid)) return true;
+    }
+    return false;
   }
 
   stats() {
     const users = Array.from(this.users.values());
+    const days = new Set();
+    const repos = new Set();
+    for (const r of this.trafficDaily.values()) {
+      if (r.kind === KIND_VIEW) {
+        days.add(r.day);
+        repos.add(r.repo);
+      }
+    }
+    let syncing = 0;
+    for (const s of this.syncStatus.values()) if (s.status === "syncing") syncing += 1;
     return {
       uptimeMs: Date.now() - this.startedAt,
-      eventCount: this.events.length,
-      dayCount: this.byDay.size,
+      recordCount: this.trafficDaily.size,
+      dayCount: days.size,
+      repoCount: repos.size,
       userCount: users.length,
       linkedCount: users.filter((u) => u.github).length,
-      openViews: this.openViews.size,
+      syncingCount: syncing,
       dataDir: this.dataDir
     };
   }
@@ -749,7 +560,6 @@ class Store {
 
 module.exports = {
   Store,
-  EVENT_LOGIN,
-  EVENT_APP_OPEN,
-  EVENT_VIEW
+  KIND_VIEW,
+  KIND_CLONE
 };

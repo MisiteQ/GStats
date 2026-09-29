@@ -1,7 +1,7 @@
 appname               = gstats
-version               = 1.0.1
+version               = 1.2.2
 display_name          = GStats
-desc                  = GitHub 使用统计平台。登录自己的 GitHub 账号后浏览仓库与主页，系统自动记录每日登录人数、访问了哪些项目以及停留时长，并支持导出 CSV / JSON / HTML 报表。
+desc                  = GitHub 仓库流量统计平台。通过 GitHub 官方 Repo Traffic API 统计仓库外部访客的浏览量(PV)、独立访客(UV)、克隆次数、来源网站与热门路径，每日自动快照存档，突破 GitHub 仅保留 14 天数据的限制；支持导出 CSV / JSON / HTML 报表。无需登录即可搜索、浏览公开仓库。
 platform              = all
 source                = thirdparty
 maintainer            = Misite齊

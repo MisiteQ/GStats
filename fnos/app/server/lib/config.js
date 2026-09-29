@@ -93,8 +93,6 @@ const DEFAULT_CONFIG = {
   defaultTheme: DEFAULT_THEME,
   /** 导出报表时是否同时落一份到共享目录 */
   exportToShare: true,
-  /** 单条浏览记录的时长上限（秒），防止异常数据把统计拉高 */
-  maxViewSeconds: 7200,
   updatedAt: 0
 };
 

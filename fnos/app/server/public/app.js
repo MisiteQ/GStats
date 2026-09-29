@@ -2,14 +2,13 @@
    GStats 前端单页应用
    - 原生 JavaScript，无构建步骤、无第三方依赖
    - Hash 路由：#/ #/github #/repo/:owner/:name #/explore #/stats #/reports #/settings
-   - 浏览埋点：进入项目详情即开始计时，15 秒心跳累计停留时长
+   - 统计数据来自 GitHub 官方 Repo Traffic API（外部访客 PV/UV/克隆/来源/路径）
    ========================================================================== */
 (function () {
   "use strict";
 
   var PREFIX = (window.GSTATS_PREFIX || "/app/gstats").replace(/\/+$/, "");
   var API_BASE = PREFIX;
-  var HEARTBEAT_MS = 15000;
 
   /* --------------------------------------------------------------- 基础工具 */
 
@@ -44,15 +43,6 @@
     var h = Math.floor(m / 60);
     if (h < 24) return h + " 小时 " + (m % 60) + " 分";
     return Math.floor(h / 24) + " 天 " + (h % 24) + " 小时";
-  }
-
-  function fmtDurShort(seconds) {
-    var s = Math.max(0, Math.round(Number(seconds) || 0));
-    if (s < 60) return s + "s";
-    var m = Math.floor(s / 60);
-    if (m < 60) return m + "m" + (s % 60 ? (s % 60) + "s" : "");
-    var h = Math.floor(m / 60);
-    return h + "h" + (m % 60 ? (m % 60) + "m" : "");
   }
 
   function fmtDateTime(ts) {
@@ -151,12 +141,13 @@
 
   function exportUrl(type, format, inline) {
     var r = state.range;
-    var q = new URLSearchParams({
-      type: type,
-      format: format,
-      from: r.from,
-      to: r.to
-    });
+    var q = new URLSearchParams({ type: type, format: format });
+    // referrers/paths 是 GitHub 提供的近 14 天滚动快照，没有日期区间概念
+    if (type !== "referrers" && type !== "paths") {
+      q.set("from", r.from);
+      q.set("to", r.to);
+    }
+    if (state.filterUid) q.set("uid", state.filterUid);
     if (inline) q.set("inline", "1");
     return API_BASE + "/api/export?" + q.toString();
   }
@@ -169,11 +160,12 @@
     users: [],
     filterUid: "",
     range: { preset: "7d", from: todayStr(-6), to: todayStr(0) },
-    statsTab: "projects",
+    statsTab: "repos",
     repo: { page: 1, q: "", sort: "updated", loading: false, items: [], total: null },
     explore: { q: "", loading: false, items: [], total: 0 },
-    currentView: null, // 当前页面标识，用于埋点去重
-    refreshTimer: null
+    currentView: null, // 当前页面标识
+    refreshTimer: null,
+    syncPoll: null // 概览页流量同步轮询定时器
   };
 
   /* ------------------------------------------------------------------- 主题 */
@@ -523,54 +515,13 @@
       "</svg>";
   }
 
-  function chartArea(days, key) {
-    if (!days.length) return emptyChart();
-    var W = 760, H = 210, padL = 44, padR = 12, padT = 14, padB = 26;
-    var innerW = W - padL - padR;
-    var innerH = H - padT - padB;
-    var max = 1;
-    days.forEach(function (d) { max = Math.max(max, Number(d[key]) || 0); });
-    max = Math.ceil(max * 1.15) || 1;
-    var step = days.length > 1 ? innerW / (days.length - 1) : innerW;
-    var pts = days.map(function (d, i) {
-      var v = Number(d[key]) || 0;
-      return [padL + step * i, padT + innerH - (v / max) * innerH, d, v];
-    });
-    var line = pts.map(function (p) { return p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
-    var area =
-      padL + "," + (padT + innerH) + " " + line + " " +
-      (padL + step * (days.length - 1)).toFixed(1) + "," + (padT + innerH);
-    var grid = "";
-    for (var g = 0; g <= 4; g++) {
-      var y = padT + (innerH / 4) * g;
-      var val = Math.round((max / 4) * (4 - g));
-      grid +=
-        '<line class="grid-line" x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) + '"/>' +
-        '<text x="' + (padL - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + fmtDurShort(val) + "</text>";
-    }
-    var dots = pts.map(function (p) {
-      return '<circle class="series-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="3.2"><title>' +
-        esc(p[2].day) + "：" + fmtDur(p[3]) + "</title></circle>";
-    }).join("");
-    var ticks = pickTicks(days.length, 8).map(function (i) {
-      return '<text x="' + (padL + step * i).toFixed(1) + '" y="' + (H - 8) + '" text-anchor="middle">' + esc(days[i].day.slice(5)) + "</text>";
-    }).join("");
-    return '<svg class="chart" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
-      grid +
-      '<polygon class="series-area" points="' + area + '"/>' +
-      '<polyline class="series-line" points="' + line + '"/>' +
-      dots + ticks +
-      '<line class="axis-line" x1="' + padL + '" y1="' + (padT + innerH) + '" x2="' + (W - padR) + '" y2="' + (padT + innerH) + '"/>' +
-      "</svg>";
-  }
-
   function emptyChart() {
     return '<div class="empty" style="padding:34px 10px">暂无数据</div>';
   }
 
   function rankList(items, opts) {
     if (!items.length) {
-      return '<div class="empty" style="padding:30px 10px"><h4>暂无浏览记录</h4><p>用户在应用内浏览项目后，这里会显示排行</p></div>';
+      return '<div class="empty" style="padding:30px 10px"><h4>暂无流量数据</h4><p>同步到 GitHub 仓库访问记录后，这里会显示排行</p></div>';
     }
     var max = Math.max.apply(null, items.map(function (i) { return Number(i.value) || 0; })) || 1;
     return '<div class="rank-list">' + items.map(function (item, idx) {
@@ -586,74 +537,6 @@
         "</div>";
     }).join("") + "</div>";
   }
-
-  /* ------------------------------------------------------------------- 埋点 */
-
-  var tracker = {
-    id: null,
-    timer: null,
-    meta: null,
-    start: function (kind, target, title, url) {
-      tracker.stop();
-      tracker.meta = { kind: kind, target: target, title: title, url: url };
-      api("/api/track/view", {
-        method: "POST",
-        body: { kind: kind, target: target, title: title, url: url }
-      })
-        .then(function (res) {
-          if (res && res.ok && res.viewId) {
-            tracker.id = res.viewId;
-            if (tracker.timer) clearInterval(tracker.timer);
-            tracker.timer = setInterval(function () {
-              tracker.heartbeat();
-            }, HEARTBEAT_MS);
-          }
-        })
-        .catch(function () {
-          /* 埋点失败不影响使用 */
-        });
-    },
-    heartbeat: function () {
-      if (!tracker.id || document.hidden) return;
-      api("/api/track/heartbeat", { method: "POST", body: { viewId: tracker.id } }).catch(function () {});
-    },
-    stop: function () {
-      if (tracker.timer) {
-        clearInterval(tracker.timer);
-        tracker.timer = null;
-      }
-      if (!tracker.id) return;
-      var id = tracker.id;
-      tracker.id = null;
-      var body = JSON.stringify({ viewId: id });
-      try {
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(API_BASE + "/api/track/end", new Blob([body], { type: "application/json" }));
-        } else {
-          fetch(API_BASE + "/api/track/end", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: body,
-            keepalive: true
-          }).catch(function () {});
-        }
-      } catch (e) {
-        /* ignore */
-      }
-    }
-  };
-
-  document.addEventListener("visibilitychange", function () {
-    if (document.hidden) tracker.stop();
-    else if (tracker.meta) {
-      var m = tracker.meta;
-      tracker.meta = null;
-      tracker.start(m.kind, m.target, m.title, m.url);
-    }
-  });
-  window.addEventListener("pagehide", function () {
-    tracker.stop();
-  });
 
   /* ------------------------------------------------------------------ 时间范围 */
 
@@ -865,119 +748,248 @@
   /* -------------------------------------------------------------------- 概览 */
 
   function renderOverview() {
-    renderShell("#/", "概览", "今天有多少人登录、看了哪些项目、停留了多久", 
-      '<button class="btn sm" type="button" id="ovRefresh">' + icon("refresh") + "刷新</button>");
+    renderShell(
+      "#/",
+      "概览",
+      "你的 GitHub 仓库被外部访客浏览的数据：浏览量、独立访客、克隆与来源网站（GitHub 官方 Traffic API）",
+      '<button class="btn sm" type="button" id="ovSync">' + icon("refresh") + "立即同步</button>" +
+      '<button class="btn sm" type="button" id="ovRefresh">刷新</button>'
+    );
     var view = el("view");
-    setHTML(view, rangeToolbar("ov") + '<div class="loading-row"><span class="spinner"></span> 正在统计 ...</div>');
+    setHTML(view, rangeToolbar("ov") + '<div class="loading-row"><span class="spinner"></span> 正在加载流量数据 ...</div>');
 
     bindRangeControls("ov", renderOverviewData);
     var rf = el("ovRefresh");
     if (rf) rf.addEventListener("click", renderOverviewData);
+    var sy = el("ovSync");
+    if (sy) sy.addEventListener("click", triggerTrafficSync);
     renderOverviewData();
+  }
+
+  function triggerTrafficSync() {
+    var btn = el("ovSync");
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("loading");
+    }
+    var q = scopeQuery().replace(/^&/, "");
+    // 管理员在「全部用户」视角下触发，同步所有已绑定账号
+    if (!q && state.me && state.me.identity && state.me.identity.isAdmin) q = "uid=all";
+    api("/api/traffic/sync" + (q ? "?" + q : ""), { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) {
+          toast(res.error || "同步启动失败", "error");
+          return;
+        }
+        toast(res.alreadyRunning ? "同步正在进行中" : "同步已开始，后台抓取 GitHub 数据中…", "success");
+        pollSyncStatus();
+      })
+      .catch(function (err) {
+        toast(err && err.message ? err.message : "同步启动失败", "error");
+      })
+      .then(function () {
+        if (btn) {
+          btn.disabled = false;
+          btn.classList.remove("loading");
+        }
+      });
+  }
+
+  function pollSyncStatus() {
+    if (state.syncPoll) clearInterval(state.syncPoll);
+    var ticks = 0;
+    state.syncPoll = setInterval(function () {
+      ticks += 1;
+      if (state.currentView !== "overview" || ticks > 120) {
+        clearInterval(state.syncPoll);
+        state.syncPoll = null;
+        return;
+      }
+      api("/api/stats/summary" + (scopeQuery() ? "?" + scopeQuery().replace(/^&/, "") : ""))
+        .then(function (sm) {
+          var running = (sm.syncItems || []).some(function (s) { return s && s.status === "syncing"; });
+          renderOverviewData();
+          if (!running) {
+            clearInterval(state.syncPoll);
+            state.syncPoll = null;
+          }
+        })
+        .catch(function () {});
+    }, 5000);
+  }
+
+  function syncStatusHtml(sm) {
+    var items = (sm && sm.syncItems) || [];
+    if (!items.length) return "";
+    return (
+      '<div class="card-desc" style="margin-bottom:10px">同步状态：' +
+      items
+        .map(function (s) {
+          var label = s.githubLogin ? "@" + s.githubLogin : "账号 " + s.uid;
+          if (s.status === "syncing") {
+            var done = (s.okRepos || 0) + (s.deniedRepos || 0) + (s.failedRepos || 0);
+            return "<b>" + esc(label) + "</b>：同步中 " + done + "/" + esc(s.repos || "?") + " 个仓库…";
+          }
+          if (s.status === "ok") {
+            return "<b>" + esc(label) + "</b>：已同步 " + (s.okRepos || 0) + " 个仓库 · " +
+              esc(s.finishedAt ? relTime(s.finishedAt) : "");
+          }
+          if (s.status === "partial") {
+            return "<b>" + esc(label) + "</b>：部分成功（" + esc(s.message || "") + "）· " +
+              esc(s.finishedAt ? relTime(s.finishedAt) : "");
+          }
+          return "<b>" + esc(label) + "</b>：" + esc(s.status || "未同步") +
+            (s.message ? "（" + esc(s.message) + "）" : "");
+        })
+        .join("　") +
+      "</div>"
+    );
   }
 
   function renderOverviewData() {
     var view = el("view");
     if (!view) return;
     var range = state.range;
-    setHTML(view, rangeToolbar("ov") + '<div class="loading-row"><span class="spinner"></span> 正在统计 ...</div>');
+    var q = scopeQuery();
+    setHTML(view, rangeToolbar("ov") + '<div class="loading-row"><span class="spinner"></span> 正在加载流量数据 ...</div>');
     bindRangeControls("ov", renderOverviewData);
 
     Promise.all([
-      api("/api/stats/overview?from=" + range.from + "&to=" + range.to + scopeQuery()),
-      api("/api/stats/projects?from=" + range.from + "&to=" + range.to + "&limit=10" + scopeQuery()),
-      api("/api/stats/summary"),
-      api("/api/stats/raw?from=" + range.from + "&to=" + range.to + "&limit=12" + scopeQuery())
+      api("/api/stats/overview?from=" + range.from + "&to=" + range.to + q),
+      api("/api/stats/repos?from=" + range.from + "&to=" + range.to + "&limit=10" + q),
+      api("/api/stats/referrers?limit=10" + q),
+      api("/api/stats/summary" + (q ? "?" + q.replace(/^&/, "") : ""))
     ])
       .then(function (res) {
-        var ov = res[0], pr = res[1], sm = res[2], raw = res[3];
+        var ov = res[0], rp = res[1], refs = res[2], sm = res[3];
         if (!ov.ok) throw new Error(ov.error || "统计接口返回异常");
+
+        // 尚未绑定任何 GitHub 账号：数据无从获取
+        if (sm.ok && !sm.linked) {
+          setHTML(
+            view,
+            rangeToolbar("ov") +
+              '<div class="card"><div class="empty" style="padding:40px 20px">' +
+              "<h4>还没有 GitHub 流量数据</h4>" +
+              "<p>外部访客数据来自 GitHub 官方的 Repo Traffic API，需要先绑定一个对仓库有推送权限的 GitHub 账号。</p>" +
+              '<p><a class="btn primary" href="#/github">前往「我的 GitHub」登录</a></p>' +
+              '<p class="muted">说明：GitHub 只提供最近 14 天的流量数据，系统会每 6 小时自动抓取并在本地长期存档。</p>' +
+              "</div></div>"
+          );
+          bindRangeControls("ov", renderOverviewData);
+          return;
+        }
+
+        // 已绑定但还没有任何快照：通常是首次同步尚未完成
+        if (sm.ok && !sm.hasTraffic) {
+          setHTML(
+            view,
+            rangeToolbar("ov") +
+              syncStatusHtml(sm) +
+              '<div class="card"><div class="empty" style="padding:40px 20px">' +
+              "<h4>正在等待第一批 GitHub 流量数据</h4>" +
+              "<p>绑定账号后系统会自动开始同步，仓库较多时可能需要几分钟。</p>" +
+              '<p><button class="btn primary" type="button" id="ovSync2">立即同步</button></p>' +
+              '<p class="muted">若同步完成后仍无数据：GitHub 仅向有推送权限的仓库（通常是你自己的仓库）提供 Traffic 数据，' +
+              "且新仓库/无访客的仓库可能没有记录。</p>" +
+              "</div></div>"
+          );
+          bindRangeControls("ov", renderOverviewData);
+          var b2 = el("ovSync2");
+          if (b2) b2.addEventListener("click", triggerTrafficSync);
+          return;
+        }
 
         var t = ov.totals;
         var today = sm.ok && sm.today ? sm.today : null;
 
         var stats = [
-          { k: "区间登录用户", v: t.loginUsers, u: "人", d: "去重后的登录用户数" },
-          { k: "日均登录用户", v: t.avgDailyLoginUsers, u: "人/天", d: "区间内平均每日登录人数" },
-          { k: "活跃用户", v: t.activeUsers, u: "人", d: "真正浏览过项目的用户" },
-          { k: "浏览次数", v: fmtNum(t.views), u: "", d: "平均单次 " + fmtDur(t.avgSecondsPerView) },
-          { k: "总停留时长", v: fmtDur(t.seconds), u: "", d: "区间内累计浏览时长" },
-          { k: "涉及项目", v: t.projects, u: "个", d: "被浏览过的项目数量" }
+          { k: "区间浏览量(PV)", v: fmtNum(t.views), u: "次", d: range.from + " ~ " + range.to },
+          { k: "日均浏览量", v: fmtNum(t.avgDailyViews), u: "次/天", d: "区间内平均每日 PV" },
+          { k: "独立访客(UV)", v: fmtNum(t.uniques), u: "人", d: "GitHub 按单仓库单日去重，此处为每日累计" },
+          { k: "克隆次数", v: fmtNum(t.clones), u: "次", d: "git clone / 下载 ZIP 等" },
+          { k: "有访问的仓库", v: fmtNum(t.repos), u: "个", d: "区间内产生过访问的仓库数" },
+          { k: "平均每仓浏览", v: fmtNum(t.avgViewsPerRepo), u: "次", d: "总浏览量 / 有访问仓库数" }
         ];
 
         var todayCards = today
           ? '<div class="grid c4" style="margin-bottom:14px">' +
-            todayStat("今日登录用户", fmtNum(today.loginUsers), "人", "今日打开 GStats 的用户") +
-            todayStat("今日活跃用户", fmtNum(today.activeUsers), "人", "今日浏览过项目") +
-            todayStat("今日停留时长", fmtDur(today.seconds), "", "今日累计浏览时长") +
-            todayStat("今日浏览项目", fmtNum(today.projects), "个", "今日被浏览的项目数") +
+            todayStat("今日浏览量", fmtNum(today.views), "次", "今日外部访客 PV") +
+            todayStat("今日独立访客", fmtNum(today.uniques), "人", "今日 UV（按仓库去重累计）") +
+            todayStat("今日克隆次数", fmtNum(today.clones), "次", "今日克隆/下载次数") +
+            todayStat("今日访问仓库", fmtNum(today.repos), "个", "今日有访问的仓库数") +
             "</div>"
           : "";
+
+        var referrerRows = (refs.ok ? refs.items : []).slice(0, 10);
+        var referrerCard =
+          '<div class="card"><div class="card-title">来源网站 TOP 10<span class="hint">近 14 天</span></div>' +
+          (referrerRows.length
+            ? '<div class="table-wrap"><table class="data"><thead><tr><th>来源</th><th>访问量</th><th>独立访客</th><th>覆盖仓库</th></tr></thead><tbody>' +
+              referrerRows
+                .map(function (r) {
+                  return "<tr><td>" + esc(r.referrer) + "</td><td>" + fmtNum(r.count) + "</td><td>" +
+                    fmtNum(r.uniques) + "</td><td>" + r.repoCount + "</td></tr>";
+                })
+                .join("") +
+              "</tbody></table></div>"
+            : '<div class="empty" style="padding:24px 10px"><h4>暂无来源数据</h4><p>GitHub 未返回来源网站（可能没有外链流量）</p></div>') +
+          "</div>";
 
         setHTML(
           view,
           rangeToolbar("ov") +
+            syncStatusHtml(sm) +
             todayCards +
             '<div class="grid c3">' +
-            stats.map(function (s) {
-              return (
-                '<div class="stat"><div class="k">' + esc(s.k) + '</div><div class="v">' + esc(s.v) +
-                (s.u ? "<small>" + esc(s.u) + "</small>" : "") + '</div><div class="d">' + esc(s.d) + "</div></div>"
-              );
-            }).join("") +
+            stats
+              .map(function (s) {
+                return (
+                  '<div class="stat"><div class="k">' + esc(s.k) + '</div><div class="v">' + esc(s.v) +
+                  (s.u ? "<small>" + esc(s.u) + "</small>" : "") + '</div><div class="d">' + esc(s.d) + "</div></div>"
+                );
+              })
+              .join("") +
             "</div>" +
             '<div class="grid side" style="margin-top:14px">' +
-            '<div class="card"><div class="card-title">每日登录用户与活跃用户<span class="hint">' +
+            '<div class="card"><div class="card-title">每日浏览量与独立访客<span class="hint">' +
             esc(range.from) + " ~ " + esc(range.to) + "</span></div>" +
             chartBars(ov.days, [
-              { key: "loginUsers", label: "登录用户" },
-              { key: "activeUsers", label: "活跃用户" }
+              { key: "views", label: "浏览量(PV)" },
+              { key: "uniques", label: "独立访客(UV)" }
             ]) +
-            '<div class="legend"><span><i style="background:var(--accent)"></i>登录用户</span><span><i style="background:var(--accent-2)"></i>活跃用户</span></div>' +
+            '<div class="legend"><span><i style="background:var(--accent)"></i>浏览量(PV)</span>' +
+            '<span><i style="background:var(--accent-2)"></i>独立访客(UV，每日去重)</span></div>' +
             "</div>" +
-            '<div class="card"><div class="card-title">项目停留时长 TOP 10</div>' +
+            '<div class="card"><div class="card-title">仓库浏览量 TOP 10</div>' +
             rankList(
-              (pr.items || []).slice(0, 10).map(function (p) {
+              (rp.items || []).slice(0, 10).map(function (p) {
                 return {
-                  label: p.target,
-                  value: p.seconds,
-                  link: "#/repo/" + p.target,
-                  display: fmtDur(p.seconds)
+                  label: p.repo,
+                  value: p.views,
+                  link: "#/repo/" + p.repo,
+                  display: fmtNum(p.views) + " 次"
                 };
               }),
               {
                 sub: function (item) {
-                  var found = (pr.items || []).filter(function (x) { return x.target === item.label; })[0];
-                  return found ? found.users + " 人访问 · " + found.views + " 次" : "";
+                  var found = (rp.items || []).filter(function (x) { return x.repo === item.label; })[0];
+                  return found
+                    ? "UV " + fmtNum(found.uniques) + " · 克隆 " + fmtNum(found.clones) + " · " + found.activeDays + " 天有访问"
+                    : "";
                 }
               }
             ) +
             "</div>" +
             "</div>" +
-            '<div class="grid side" style="margin-top:14px">' +
-            '<div class="card"><div class="card-title">每日停留时长趋势</div>' + chartArea(ov.days, "seconds") + "</div>" +
-            '<div class="card"><div class="card-title">最近浏览记录</div>' +
-            (raw.ok && raw.items.length
-              ? '<div class="table-wrap"><table class="data"><thead><tr><th>时间</th><th>用户</th><th>项目</th><th style="text-align:right">停留</th></tr></thead><tbody>' +
-                raw.items
-                  .map(function (r) {
-                    return "<tr><td>" + esc(relTime(r.ts)) + "</td><td>" + esc(r.fnosUser || r.uid) +
-                      (r.githubLogin ? ' <span class="muted">@' + esc(r.githubLogin) + "</span>" : "") +
-                      '</td><td><a href="#/repo/' + attr(r.target) + '">' + esc(r.target) + "</a></td>" +
-                      '<td class="num">' + esc(fmtDur(r.seconds)) + "</td></tr>";
-                  })
-                  .join("") +
-                "</tbody></table></div>"
-              : '<div class="empty" style="padding:26px 10px"><h4>暂无浏览记录</h4><p>用户在应用内浏览项目后这里会实时显示</p></div>') +
-            "</div>" +
-            "</div>"
+            '<div class="grid side" style="margin-top:14px">' + referrerCard + "</div>"
         );
         bindRangeControls("ov", renderOverviewData);
       })
       .catch(function (err) {
         setHTML(
           view,
-          rangeToolbar("ov") + errorCard("统计加载失败", err && err.message ? err.message : "网络请求失败")
+          rangeToolbar("ov") + errorCard("流量数据加载失败", err && err.message ? err.message : "网络请求失败")
         );
         bindRangeControls("ov", renderOverviewData);
         bindRetry(view);
@@ -994,7 +1006,7 @@
   /* ---------------------------------------------------------------- 我的 GitHub */
 
   function renderGithub() {
-    renderShell("#/github", "我的 GitHub", "登录 GitHub 账号即可浏览自己的仓库，浏览行为会被自动统计");
+    renderShell("#/github", "我的 GitHub", "绑定 GitHub 账号以浏览仓库，并通过官方 Traffic API 统计外部访客流量");
     var view = el("view");
     if (!state.me.linked) {
       renderLoginCard(view);
@@ -1008,7 +1020,8 @@
       var profile = res[0], repos = res[1];
       var html = "";
       if (profile.ok) {
-        var p = profile.data;        html +=
+        var p = profile.profile;
+        html +=
           '<div class="card"><div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">' +
           '<img class="avatar lg" src="' + attr(p.avatar_url) + '" alt=""/>' +
           '<div style="flex:1;min-width:220px">' +
@@ -1035,7 +1048,7 @@
 
       html +=
         '<div class="card"><div class="card-title">我的仓库' +
-        '<span class="hint">点击任意仓库即可查看详情，停留时长会被自动记录</span></div>' +
+        '<span class="hint">点击任意仓库即可查看详情</span></div>' +
         '<div class="toolbar" style="margin-top:12px">' +
         '<input class="input" style="max-width:280px" id="repoSearch" placeholder="搜索我的仓库 ..." value="' + attr(state.repo.q) + '"/>' +
         '<select class="select" style="width:150px" id="repoSort">' +
@@ -1197,7 +1210,7 @@
       '<div class="grid side">' +
         '<div class="card">' +
         '<div class="card-title">使用 GitHub 账号登录</div>' +
-        '<div class="card-desc">登录后即可在 GStats 内浏览你自己的仓库与项目详情，浏览的项目和停留时长会自动记入统计。</div>' +
+        '<div class="card-desc">登录后即可在 GStats 内浏览你自己的仓库与项目详情；系统会通过 GitHub 官方 Traffic API 定期拉取你有权限仓库的外部访客流量。</div>' +
         '<div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">' +
         '<button class="btn primary" type="button" id="oauthLogin"' + (oauthReady ? "" : " disabled") + ">" +
         icon("github") + " 使用 GitHub 授权登录</button>" +
@@ -1215,9 +1228,11 @@
         "</div>" +
         '<div class="card"><div class="card-title">关于统计口径</div>' +
         '<ul style="padding-left:18px;color:var(--text-2);font-size:13px;line-height:1.9;margin:10px 0 0">' +
-        "<li><b>登录用户</b>：当日打开 GStats 的去重用户数</li>" +
-        "<li><b>活跃用户</b>：当日真正浏览过至少一个项目的用户数</li>" +
-        "<li><b>项目停留时长</b>：从进入项目详情到离开的计时，15 秒一次心跳累计</li>" +
+        "<li><b>浏览量(PV) / 独立访客(UV)</b>：GitHub 官方统计的仓库页面访问数据，统计的是<b>外部访客</b>，不包含登录 GStats 浏览的 NAS 用户</li>" +
+        "<li><b>克隆数据</b>：仓库被 git clone 的次数与去重克隆者数</li>" +
+        "<li><b>来源网站 / 热门路径</b>：GitHub 提供的近 14 天滚动快照；每日浏览与克隆数据会在本机每日存档，可长期回溯</li>" +
+        "<li><b>权限说明</b>：Traffic API 只能读取你拥有推送（push）权限的仓库，无权限的仓库会自动跳过</li>" +
+        "<li>不登录也可以在「发现项目」搜索、浏览公开仓库；登录后还能查看自己的私有仓库</li>" +
         "<li>数据全部保存在本机 NAS，不会上传到任何第三方</li>" +
         "</ul>" +
         '<div class="about-dev" style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border)">开发者 <b>Misite齊</b> · ' +
@@ -1280,15 +1295,12 @@
     renderShell(
       "#/github",
       full,
-      "项目详情 · 停留时长正在统计中",
+      "项目详情",
       '<a class="btn sm" href="https://github.com/' + attr(full) + '" target="_blank" rel="noopener noreferrer">' +
         icon("external") + "在 GitHub 打开</a>"
     );
     var view = el("view");
     setHTML(view, '<div class="loading-row"><span class="spinner"></span> 正在加载项目信息 ...</div>');
-
-    // 进入项目详情即开始计时
-    tracker.start("repo", full, full, "https://github.com/" + full);
 
     Promise.all([
       api("/api/github/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(name)),
@@ -1421,7 +1433,7 @@
   /* ---------------------------------------------------------------- 发现项目 */
 
   function renderExplore() {
-    renderShell("#/explore", "发现项目", "搜索 GitHub 上的任意仓库，打开即计入项目浏览统计");
+    renderShell("#/explore", "发现项目", "无需登录，直接搜索 GitHub 上的公开仓库，打开即计入项目浏览统计");
     state.currentView = "explore";
     var view = el("view");
     setHTML(
@@ -1432,14 +1444,14 @@
         '<button class="btn primary" type="button" id="exBtn">' + icon("search") + "搜索</button>" +
         '<button class="btn" type="button" id="exPopular">随机推荐</button>' +
         "</div>" +
-        '<div class="card-desc">提示：需要在「我的 GitHub」中完成登录后才可以搜索。</div>' +
+        '<div class="card-desc">提示：搜索范围为 GitHub 上的公开仓库，无需登录即可使用；未登录时受 GitHub 限流（约 10 次/分钟）。</div>' +
         "</div>" +
         '<div class="card" id="exResults"><div class="empty"><h4>输入关键词开始搜索</h4><p>也可以直接点击「随机推荐」看看热门项目</p></div></div>'
     );
     var input = el("exInput");
     var doSearch = function (q) {
-      if (!state.me.linked) {
-        toast("请先登录 GitHub 账号", "error");
+      if (!q) {
+        toast("请输入搜索关键词", "error");
         return;
       }
       state.explore.q = q;
@@ -1494,15 +1506,15 @@
   /* ---------------------------------------------------------------- 统计明细 */
 
   var STATS_TABS = [
-    { id: "projects", label: "项目热度" },
-    { id: "users", label: "用户明细" },
-    { id: "user_projects", label: "用户 × 项目" },
-    { id: "daily", label: "每日汇总" },
-    { id: "raw", label: "原始记录" }
+    { id: "repos", label: "仓库流量" },
+    { id: "daily", label: "每日流量" },
+    { id: "referrers", label: "来源网站" },
+    { id: "paths", label: "热门路径" }
   ];
+  var SNAPSHOT_TABS = { referrers: 1, paths: 1 };
 
   function renderStats() {
-    renderShell("#/stats", "统计明细", "从项目、用户、日期等维度查看浏览明细");
+    renderShell("#/stats", "统计明细", "查看 GitHub 仓库的外部访客流量明细（数据来自 GitHub 官方 Traffic API）");
     var view = el("view");
     setHTML(
       view,
@@ -1536,11 +1548,15 @@
     if (!body) return;
     var range = state.range;
     setHTML(body, '<div class="loading-row"><span class="spinner"></span> 加载中 ...</div>');
-    var base = "&from=" + range.from + "&to=" + range.to + scopeQuery();
     var tab = state.statsTab;
-    var path = tab === "raw" ? "/api/stats/raw?limit=500" + base
-      : tab === "daily" ? "/api/stats/overview?" + base.slice(1)
-      : "/api/stats/" + (tab === "user_projects" ? "user-projects" : tab) + "?limit=300" + base;
+    var path;
+    if (tab === "daily") {
+      path = "/api/stats/overview?from=" + range.from + "&to=" + range.to + scopeQuery();
+    } else if (tab === "referrers" || tab === "paths") {
+      path = "/api/stats/" + tab + "?limit=100" + scopeQuery();
+    } else {
+      path = "/api/stats/repos?from=" + range.from + "&to=" + range.to + "&limit=300" + scopeQuery();
+    }
 
     api(path).then(function (res) {
       if (!res.ok) {
@@ -1552,19 +1568,25 @@
   }
 
   function renderStatsTable(tab, res) {
+    var snapshotNote = SNAPSHOT_TABS[tab]
+      ? '<div class="card-desc">数据为 GitHub 提供的近 14 天滚动快照，不随时间范围变化；更新于 ' +
+        esc(res.updatedAt ? fmtDateTime(res.updatedAt) : "尚未同步") + "</div>"
+      : "";
+
     if (tab === "daily") {
       var days = res.days || [];
       return (
+        snapshotNote +
         '<div class="table-wrap"><table class="data"><thead><tr>' +
-        "<th>日期</th><th>登录用户</th><th>活跃用户</th><th>授权登录次数</th><th>打开应用</th><th>浏览次数</th><th>项目数</th><th>停留时长</th>" +
+        "<th>日期</th><th>浏览量(PV)</th><th>独立访客(UV)</th><th>克隆次数</th><th>克隆者数</th><th>有访问仓库</th>" +
         "</tr></thead><tbody>" +
         days
           .slice()
           .reverse()
           .map(function (d) {
-            return "<tr><td>" + esc(d.day) + "</td><td>" + d.loginUsers + "</td><td>" + d.activeUsers + "</td><td>" +
-              d.authLogins + "</td><td>" + d.appOpens + "</td><td>" + d.views + "</td><td>" + d.projects + "</td><td>" +
-              esc(fmtDur(d.seconds)) + "</td></tr>";
+            return "<tr><td>" + esc(d.day) + "</td><td>" + fmtNum(d.views) + "</td><td>" +
+              fmtNum(d.uniques) + "</td><td>" + fmtNum(d.clones) + "</td><td>" +
+              fmtNum(d.cloneUniques) + "</td><td>" + d.repos + "</td></tr>";
           })
           .join("") +
         "</tbody></table></div>"
@@ -1572,59 +1594,46 @@
     }
     var items = res.items || [];
     if (!items.length) {
-      return '<div class="empty"><h4>该时间段暂无数据</h4><p>调整时间范围或让用户在应用内浏览项目</p></div>';
+      return snapshotNote + '<div class="empty"><h4>暂无数据</h4><p>请确认已在「我的 GitHub」绑定账号，并等待同步完成</p></div>';
     }
-    if (tab === "projects") {
+    if (tab === "repos") {
       return (
-        '<div class="table-wrap"><table class="data"><thead><tr><th>项目</th><th>访问人数</th><th>浏览次数</th><th>总停留</th><th>平均停留</th><th>最后访问</th><th>访问者</th></tr></thead><tbody>' +
+        snapshotNote +
+        '<div class="table-wrap"><table class="data"><thead><tr><th>仓库</th><th>浏览量(PV)</th><th>独立访客(UV累计)</th><th>克隆次数</th><th>克隆者数</th><th>有访问天数</th><th>日均浏览</th><th>时间范围</th></tr></thead><tbody>' +
         items
           .map(function (p) {
-            return "<tr><td><a href=\"#/repo/" + attr(p.target) + '">' + esc(p.target) + "</a></td>" +
-              "<td>" + p.users + "</td><td>" + p.views + "</td><td>" + esc(fmtDur(p.seconds)) + "</td><td>" +
-              esc(fmtDur(p.avgSeconds)) + "</td><td>" + esc(fmtDateTime(p.lastAt)) + "</td>" +
-              '<td class="muted">' + esc((p.userList || []).map(function (x) { return "@" + x; }).join(" ")) + "</td></tr>";
+            return "<tr><td><a href=\"#/repo/" + attr(p.repo) + '">' + esc(p.repo) + "</a></td>" +
+              "<td>" + fmtNum(p.views) + "</td><td>" + fmtNum(p.uniques) + "</td><td>" +
+              fmtNum(p.clones) + "</td><td>" + fmtNum(p.cloneUniques) + "</td><td>" + p.activeDays +
+              "</td><td>" + fmtNum(p.avgDailyViews) + '</td><td class="muted">' +
+              esc(p.firstDay) + " ~ " + esc(p.lastDay) + "</td></tr>";
           })
           .join("") +
         "</tbody></table></div>"
       );
     }
-    if (tab === "users") {
+    if (tab === "referrers") {
       return (
-        '<div class="table-wrap"><table class="data"><thead><tr><th>用户</th><th>GitHub</th><th>活跃天数</th><th>授权登录</th><th>打开应用</th><th>浏览次数</th><th>项目数</th><th>总停留</th><th>最后活动</th></tr></thead><tbody>' +
-        items
-          .map(function (u) {
-            return "<tr><td>" + esc(u.fnosUser || u.uid) + "</td><td>" +
-              (u.githubLogin ? '<a href="https://github.com/' + attr(u.githubLogin) + '" target="_blank" rel="noopener noreferrer">@' + esc(u.githubLogin) + "</a>" : '<span class="muted">未关联</span>') +
-              "</td><td>" + u.activeDays + "</td><td>" + u.logins + "</td><td>" + u.appOpens + "</td><td>" + u.views +
-              "</td><td>" + u.projectCount + "</td><td>" + esc(fmtDur(u.seconds)) + "</td><td>" + esc(fmtDateTime(u.lastAt)) + "</td></tr>";
-          })
-          .join("") +
-        "</tbody></table></div>"
-      );
-    }
-    if (tab === "user_projects") {
-      return (
-        '<div class="table-wrap"><table class="data"><thead><tr><th>用户</th><th>GitHub</th><th>项目</th><th>访问天数</th><th>浏览次数</th><th>总停留</th><th>平均停留</th><th>最后访问</th></tr></thead><tbody>' +
+        snapshotNote +
+        '<div class="table-wrap"><table class="data"><thead><tr><th>来源网站</th><th>访问量</th><th>独立访客</th><th>覆盖仓库数</th></tr></thead><tbody>' +
         items
           .map(function (r) {
-            return "<tr><td>" + esc(r.fnosUser || r.uid) + "</td><td>" +
-              (r.githubLogin ? "@" + esc(r.githubLogin) : '<span class="muted">-</span>') +
-              '</td><td><a href="#/repo/' + attr(r.target) + '">' + esc(r.target) + "</a></td><td>" + r.activeDays +
-              "</td><td>" + r.views + "</td><td>" + esc(fmtDur(r.seconds)) + "</td><td>" + esc(fmtDur(r.avgSeconds)) +
-              "</td><td>" + esc(fmtDateTime(r.lastAt)) + "</td></tr>";
+            return "<tr><td>" + esc(r.referrer) + "</td><td>" + fmtNum(r.count) + "</td><td>" +
+              fmtNum(r.uniques) + "</td><td>" + r.repoCount + "</td></tr>";
           })
           .join("") +
         "</tbody></table></div>"
       );
     }
+    // paths
     return (
-      '<div class="table-wrap"><table class="data"><thead><tr><th>时间</th><th>用户</th><th>GitHub</th><th>类型</th><th>项目</th><th>停留时长</th><th>开始</th><th>结束</th></tr></thead><tbody>' +
+      snapshotNote +
+      '<div class="table-wrap"><table class="data"><thead><tr><th>页面标题</th><th>路径</th><th>访问量</th><th>独立访客</th><th>覆盖仓库数</th></tr></thead><tbody>' +
       items
         .map(function (r) {
-          return "<tr><td>" + esc(fmtDateTime(r.ts)) + "</td><td>" + esc(r.fnosUser || r.uid) + "</td><td>" +
-            (r.githubLogin ? "@" + esc(r.githubLogin) : '<span class="muted">-</span>') + "</td><td>" + esc(r.kind) +
-            "</td><td>" + esc(r.target) + "</td><td>" + esc(fmtDur(r.seconds)) + "</td><td>" + esc(fmtDateTime(r.startedAt)) +
-            "</td><td>" + esc(fmtDateTime(r.endedAt)) + "</td></tr>";
+          return "<tr><td>" + esc(r.title) + '</td><td><a href="https://github.com' + attr(r.path) +
+            '" target="_blank" rel="noopener noreferrer"><code>' + esc(r.path) + "</code></a></td><td>" +
+            fmtNum(r.count) + "</td><td>" + fmtNum(r.uniques) + "</td><td>" + r.repoCount + "</td></tr>";
         })
         .join("") +
       "</tbody></table></div>"
@@ -1634,11 +1643,10 @@
   /* ---------------------------------------------------------------- 报表导出 */
 
   var REPORT_TYPES = [
-    { id: "daily", label: "每日汇总报表", desc: "每天有多少用户登录、浏览了多少项目、停留多久" },
-    { id: "users", label: "用户明细报表", desc: "每个飞牛用户 / GitHub 账号的活跃天数、浏览次数与总时长" },
-    { id: "projects", label: "项目热度报表", desc: "每个项目被多少人看过、总时长与平均停留时长" },
-    { id: "user_projects", label: "用户 × 项目报表", desc: "某位用户分别看了哪些项目、各看了多久" },
-    { id: "raw", label: "原始访问记录", desc: "每一条浏览记录的精确起止时间，适合二次分析" }
+    { id: "daily", label: "每日流量报表", desc: "每天的浏览量(PV)、独立访客(UV)、克隆次数与有访问的仓库数" },
+    { id: "repos", label: "仓库流量报表", desc: "每个仓库在区间内的浏览量、UV、克隆数与日均浏览" },
+    { id: "referrers", label: "来源网站报表", desc: "近 14 天外部访客从哪些网站跳转到你的仓库" },
+    { id: "paths", label: "热门路径报表", desc: "近 14 天仓库内被访问最多的页面路径" }
   ];
 
   function renderReports() {
@@ -1723,10 +1731,10 @@
         setHTML(
           body,
           '<div class="grid c4">' +
-            todayStat("登录用户", fmtNum(t.loginUsers), "人", "区间内去重") +
-            todayStat("日均登录", fmtNum(t.avgDailyLoginUsers), "人", "每日平均") +
-            todayStat("浏览次数", fmtNum(t.views), "次", "平均单次 " + fmtDur(t.avgSecondsPerView)) +
-            todayStat("总停留", fmtDur(t.seconds), "", "共 " + t.projects + " 个项目") +
+            todayStat("总浏览量", fmtNum(t.views), "次", "区间内 PV") +
+            todayStat("日均浏览", fmtNum(t.avgDailyViews), "次/天", "每日平均 PV") +
+            todayStat("独立访客", fmtNum(t.uniques), "人", "每日 UV 累计") +
+            todayStat("克隆次数", fmtNum(t.clones), "次", "共 " + t.repos + " 个仓库有访问") +
             "</div>"
         );
       });
@@ -1831,8 +1839,10 @@
           ["网关路径", hRes.config.gateway],
           ["数据目录", dt.dataDir],
           ["共享目录", (state.system && state.system.shareDir) || "-"],
-          ["事件总数", fmtNum(dt.eventCount)],
+          ["流量记录数", fmtNum(dt.recordCount)],
           ["覆盖天数", fmtNum(dt.dayCount)],
+          ["覆盖仓库", fmtNum(dt.repoCount)],
+          ["同步中用户", fmtNum(dt.syncingCount)],
           ["用户数", fmtNum(dt.userCount) + "（已关联 GitHub " + dt.linkedCount + "）"]
         ];
         setHTML(
@@ -1891,7 +1901,6 @@
     if (!state.me) return;
     var hash = location.hash || "#/";
     var parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-    tracker.stop();
 
     if (!parts.length) {
       state.currentView = "overview";

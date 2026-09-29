@@ -52,6 +52,15 @@ function invalidate(prefix) {
 }
 
 async function request(url, { token, method = "GET", body, accept } = {}) {
+  const res = await rawRequest(url, { token, method, body, accept });
+  // Token 过期/失效时，对非认证类接口自动降级为匿名重试一次
+  if (token && res.status === 401 && method === "GET" && !body) {
+    return rawRequest(url, { token: "", method, body, accept });
+  }
+  return res;
+}
+
+async function rawRequest(url, { token, method = "GET", body, accept } = {}) {
   const headers = {
     Accept: accept || "application/vnd.github+json",
     "User-Agent": USER_AGENT,
@@ -248,11 +257,12 @@ async function getVisibility(token, login) {
 }
 
 async function getRepo(token, owner, repo) {
-  const key = `repo:${owner}/${repo}`;
+  // 匿名与登录用户的缓存分开，避免 A 用户可见的私有仓库被缓存后泄露给匿名访问
+  const key = `repo:${token ? "auth" : "anon"}:${owner}/${repo}`;
   const cached = cacheGet(key);
   if (cached) return cached;
   const res = await request(`${apiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
-    token
+    token: token || ""
   });
   if (!res.ok) return { ok: false, status: res.status, message: failMessage(res) };
   const out = { ok: true, data: normalizeRepo(res.data), raw: res.data };
@@ -340,8 +350,18 @@ async function searchRepositories(token, { q, page = 1, perPage = 20, sort = "be
   });
   if (sort === "stars") params.set("sort", "stars");
   if (sort === "updated") params.set("sort", "updated");
-  const res = await request(`${apiBase()}/search/repositories?${params.toString()}`, { token });
-  if (!res.ok) return { ok: false, status: res.status, message: failMessage(res) };
+  const res = await request(`${apiBase()}/search/repositories?${params.toString()}`, { token: token || "" });
+  if (!res.ok) {
+    // 匿名调用时 GitHub 搜索接口限流为 10 次/分钟，给出可操作的提示
+    if (!token && res.status === 403) {
+      return {
+        ok: false,
+        status: 403,
+        message: "未登录状态下 GitHub 搜索限流较严格（10 次/分钟），请稍后再试，或在「我的 GitHub」登录后搜索"
+      };
+    }
+    return { ok: false, status: res.status, message: failMessage(res) };
+  }
   return {
     ok: true,
     items: (res.data.items || []).map(normalizeRepo),
@@ -374,6 +394,69 @@ async function listEvents(token, login, { perPage = 30 } = {}) {
   return out;
 }
 
+/* ------------------------------------------------------------ Traffic API */
+
+/**
+ * 列出当前 token 有推送权限的仓库（只有这些仓库能读取 Traffic 数据）。
+ * 自动翻页，最多 maxPages 页，避免仓库过多时吃光限流额度。
+ */
+async function listEditableRepos(token, { perPage = 100, maxPages = 3 } = {}) {
+  const items = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const res = await request(
+      `${apiBase()}/user/repos?per_page=${perPage}&page=${page}&affiliation=owner,collaborator,organization_member&sort=pushed&direction=desc`,
+      { token }
+    );
+    if (!res.ok) return { ok: false, status: res.status, message: failMessage(res) };
+    const rows = Array.isArray(res.data) ? res.data : [];
+    for (const r of rows) items.push(normalizeRepo(r));
+    if (rows.length < perPage) break;
+  }
+  return { ok: true, items };
+}
+
+function trafficResult(res) {
+  if (res.ok) return { ok: true, data: res.data, rateLimit: res.rateLimit };
+  // 404：对该仓库没有推送权限；403：限流或权限不足，交由调用方决定是否中止
+  return { ok: false, status: res.status, message: failMessage(res), rateLimit: res.rateLimit };
+}
+
+/** 仓库访问量：近 14 天每日 PV / UV */
+async function getTrafficViews(token, owner, repo) {
+  const res = await request(
+    `${apiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/traffic/views`,
+    { token }
+  );
+  return trafficResult(res);
+}
+
+/** 仓库克隆量：近 14 天每日克隆次数 / 克隆者数 */
+async function getTrafficClones(token, owner, repo) {
+  const res = await request(
+    `${apiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/traffic/clones`,
+    { token }
+  );
+  return trafficResult(res);
+}
+
+/** 热门来源网站（近 14 天） */
+async function getTrafficReferrers(token, owner, repo) {
+  const res = await request(
+    `${apiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/traffic/popular/referrers`,
+    { token }
+  );
+  return trafficResult(res);
+}
+
+/** 热门访问路径（近 14 天） */
+async function getTrafficPaths(token, owner, repo) {
+  const res = await request(
+    `${apiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/traffic/popular/paths`,
+    { token }
+  );
+  return trafficResult(res);
+}
+
 module.exports = {
   buildAuthorizeUrl,
   exchangeCode,
@@ -387,6 +470,11 @@ module.exports = {
   listCommits,
   searchRepositories,
   listEvents,
+  listEditableRepos,
+  getTrafficViews,
+  getTrafficClones,
+  getTrafficReferrers,
+  getTrafficPaths,
   invalidate,
   normalizeRepo,
   failMessage

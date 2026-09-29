@@ -15,6 +15,7 @@ const config = require("./lib/config");
 const auth = require("./lib/auth");
 const github = require("./lib/github");
 const report = require("./lib/report");
+const traffic = require("./lib/traffic");
 const util = require("./lib/util");
 const { Store } = require("./lib/store");
 
@@ -186,6 +187,22 @@ function requireAdmin(ctx, res) {
   return true;
 }
 
+/** 后台异步同步某用户的 GitHub 流量，不阻塞当前请求 */
+function scheduleUserSync(uid, delayMs = 3000) {
+  setTimeout(() => {
+    traffic.syncUser(store, uid).catch((e) => {
+      console.error(`[gstats] traffic sync for ${uid} failed:`, e.message);
+      store.setSyncStatus(uid, { status: "failed", finishedAt: Date.now(), message: e.message });
+      store.persistTraffic();
+    });
+  }, delayMs).unref();
+}
+
+/** 统计查询的用户范围：非管理员只能看自己绑定账号的数据 */
+function statsUid(ctx, url) {
+  return ctx.isAdmin ? url.searchParams.get("uid") || null : ctx.identity.uid;
+}
+
 /** 解析统计区间，默认最近 7 天 */
 function resolveRange(url, tz) {
   const today = util.dayKey(Date.now(), tz);
@@ -222,7 +239,6 @@ route("GET", "/api/health", async (req, res, ctx) => {
 });
 
 route("GET", "/api/me", async (req, res, ctx) => {
-  store.recordAppOpen(ctx.user, ctx.agent);
   sendJson(res, 200, {
     ok: true,
     identity: {
@@ -236,6 +252,7 @@ route("GET", "/api/me", async (req, res, ctx) => {
     authMethod: ctx.user.authMethod || "",
     lastLoginAt: ctx.user.lastLoginAt || 0,
     loginCount: ctx.user.loginCount || 0,
+    syncStatus: store.getSyncStatus(ctx.identity.uid),
     system: config.publicConfig(cfg)
   });
 });
@@ -300,9 +317,10 @@ route("GET", "/api/auth/github/callback", async (req, res, ctx) => {
     profile: profile.data,
     method: "oauth"
   });
-  store.recordLogin(user, ctx.agent);
+  store.recordLogin(user);
   github.invalidate("repos:");
   github.invalidate("visibility:");
+  scheduleUserSync(ctx.identity.uid);
 
   return redirectBack(`${firstLink ? "linked=1" : "relinked=1"}&login=ok`);
 });
@@ -321,9 +339,10 @@ route("POST", "/api/auth/pat", async (req, res, ctx) => {
     profile: profile.data,
     method: "pat"
   });
-  store.recordLogin(user, ctx.agent);
+  store.recordLogin(user);
   github.invalidate("repos:");
   github.invalidate("visibility:");
+  scheduleUserSync(ctx.identity.uid);
   sendJson(res, 200, { ok: true, firstLink, github: user.github });
 });
 
@@ -370,10 +389,11 @@ route("GET", "/api/github/repos", async (req, res, ctx) => {
 });
 
 route("GET", "/api/github/repos/:owner/:repo", async (req, res, ctx, params) => {
-  if (!requireGithub(ctx, res)) return;
+  // 公开仓库无需登录即可查看（发现项目入口）；已登录用户携带 token 以读到私有仓库
+  const token = ctx.token || "";
   const [repoRes, langRes] = await Promise.all([
-    github.getRepo(ctx.token, params.owner, params.repo),
-    github.getLanguages(ctx.token, params.owner, params.repo)
+    github.getRepo(token, params.owner, params.repo),
+    github.getLanguages(token, params.owner, params.repo)
   ]);
   if (!repoRes.ok) return sendError(res, repoRes.status || 502, repoRes.message);
   sendJson(res, 200, {
@@ -384,15 +404,13 @@ route("GET", "/api/github/repos/:owner/:repo", async (req, res, ctx, params) => 
 });
 
 route("GET", "/api/github/repos/:owner/:repo/readme", async (req, res, ctx, params) => {
-  if (!requireGithub(ctx, res)) return;
-  const result = await github.getReadme(ctx.token, params.owner, params.repo);
+  const result = await github.getReadme(ctx.token || "", params.owner, params.repo);
   if (!result.ok) return sendError(res, result.status || 502, result.message);
   sendJson(res, 200, { ok: true, readme: result.data });
 });
 
 route("GET", "/api/github/repos/:owner/:repo/issues", async (req, res, ctx, params) => {
-  if (!requireGithub(ctx, res)) return;
-  const result = await github.listIssues(ctx.token, params.owner, params.repo, {
+  const result = await github.listIssues(ctx.token || "", params.owner, params.repo, {
     state: ctx.url.searchParams.get("state") === "closed" ? "closed" : "open",
     perPage: util.clampInt(ctx.url.searchParams.get("perPage"), 1, 50, 20)
   });
@@ -401,8 +419,7 @@ route("GET", "/api/github/repos/:owner/:repo/issues", async (req, res, ctx, para
 });
 
 route("GET", "/api/github/repos/:owner/:repo/commits", async (req, res, ctx, params) => {
-  if (!requireGithub(ctx, res)) return;
-  const result = await github.listCommits(ctx.token, params.owner, params.repo, {
+  const result = await github.listCommits(ctx.token || "", params.owner, params.repo, {
     perPage: util.clampInt(ctx.url.searchParams.get("perPage"), 1, 50, 20)
   });
   if (!result.ok) return sendError(res, result.status || 502, result.message);
@@ -410,10 +427,10 @@ route("GET", "/api/github/repos/:owner/:repo/commits", async (req, res, ctx, par
 });
 
 route("GET", "/api/github/search", async (req, res, ctx) => {
-  if (!requireGithub(ctx, res)) return;
+  // 发现项目：简单的 GitHub 仓库搜索，不要求登录；匿名时受 GitHub 限流（搜索 10 次/分钟）
   const q = util.safeString(ctx.url.searchParams.get("q") || "", 120).trim();
   if (!q) return sendJson(res, 200, { ok: true, items: [], total: 0 });
-  const result = await github.searchRepositories(ctx.token, {
+  const result = await github.searchRepositories(ctx.token || "", {
     q,
     page: util.clampInt(ctx.url.searchParams.get("page"), 1, 50, 1),
     perPage: util.clampInt(ctx.url.searchParams.get("perPage"), 1, 50, 20),
@@ -432,41 +449,60 @@ route("GET", "/api/github/activity", async (req, res, ctx) => {
   sendJson(res, 200, { ok: true, items: result.data });
 });
 
-/* ---------------------------------------------------------------------- 埋点 */
+/* ------------------------------------------------------------- 流量同步 */
 
-route("POST", "/api/track/view", async (req, res, ctx) => {
-  const body = await readJsonBody(req);
-  const session = store.startView({
-    user: ctx.user,
-    kind: util.safeString(body.kind || "repo", 32),
-    target: util.safeString(body.target || "unknown", 200),
-    title: util.safeString(body.title || "", 200),
-    url: util.safeString(body.url || "", 500),
-    agent: ctx.agent
-  });
-  sendJson(res, 200, { ok: true, viewId: session.id });
+route("POST", "/api/traffic/sync", async (req, res, ctx) => {
+  // 普通用户只能同步自己；管理员可通过 uid=all 同步全部已绑定账号
+  const targetUid = ctx.url.searchParams.get("uid");
+  let syncing = false;
+
+  if (targetUid === "all") {
+    if (!requireAdmin(ctx, res)) return;
+    const linked = store.listUsers().filter((u) => u.github);
+    if (!linked.length) return sendError(res, 428, "还没有任何用户绑定 GitHub 账号", "github_not_linked");
+    linked.forEach((u, i) => {
+      if (!store.isSyncing(u.uid)) {
+        traffic.syncUser(store, u.uid).catch((e) => {
+          console.error(`[gstats] traffic sync for ${u.uid} failed:`, e.message);
+          store.setSyncStatus(u.uid, { status: "failed", finishedAt: Date.now(), message: e.message });
+          store.persistTraffic();
+        });
+        syncing = true;
+      }
+    });
+  } else {
+    const uid = ctx.isAdmin && targetUid ? targetUid : ctx.identity.uid;
+    if (!store.getUser(uid) || !store.getUser(uid).github) {
+      return sendError(res, 428, "该用户尚未绑定 GitHub 账号", "github_not_linked");
+    }
+    if (store.isSyncing(uid)) {
+      return sendJson(res, 202, { ok: true, alreadyRunning: true, status: store.getSyncStatus(uid) });
+    }
+    // 后台执行，接口立即返回；前端通过 /api/stats/summary 轮询进度
+    traffic.syncUser(store, uid).catch((e) => {
+      console.error(`[gstats] traffic sync for ${uid} failed:`, e.message);
+      store.setSyncStatus(uid, { status: "failed", finishedAt: Date.now(), message: e.message });
+      store.persistTraffic();
+    });
+    syncing = true;
+  }
+  sendJson(res, 202, { ok: true, started: syncing, alreadyRunning: !syncing });
 });
 
-route("POST", "/api/track/heartbeat", async (req, res, ctx) => {
-  const body = await readJsonBody(req);
-  const session = store.heartbeat(util.safeString(body.viewId, 80), {
-    title: util.safeString(body.title || "", 200),
-    target: util.safeString(body.target || "", 200)
+route("GET", "/api/stats/sync-status", async (req, res, ctx) => {
+  const uid = statsUid(ctx, ctx.url);
+  sendJson(res, 200, {
+    ok: true,
+    scope: uid ? "user" : "all",
+    items: store.listSyncStatus(uid)
   });
-  sendJson(res, 200, { ok: Boolean(session), seconds: session ? session.seconds : 0 });
-});
-
-route("POST", "/api/track/end", async (req, res, ctx) => {
-  const body = await readJsonBody(req);
-  const evt = store.endView(util.safeString(body.viewId, 80));
-  sendJson(res, 200, { ok: true, seconds: evt ? evt.seconds : 0 });
 });
 
 /* ---------------------------------------------------------------------- 统计 */
 
 route("GET", "/api/stats/overview", async (req, res, ctx) => {
   const { from, to } = resolveRange(ctx.url, cfg.timezone);
-  const uid = ctx.isAdmin ? ctx.url.searchParams.get("uid") || null : ctx.identity.uid;
+  const uid = statsUid(ctx, ctx.url);
   const data = store.overview(from, to, uid);
   sendJson(res, 200, {
     ok: true,
@@ -476,10 +512,10 @@ route("GET", "/api/stats/overview", async (req, res, ctx) => {
   });
 });
 
-route("GET", "/api/stats/projects", async (req, res, ctx) => {
+route("GET", "/api/stats/repos", async (req, res, ctx) => {
   const { from, to } = resolveRange(ctx.url, cfg.timezone);
-  const uid = ctx.isAdmin ? ctx.url.searchParams.get("uid") || null : ctx.identity.uid;
-  const items = store.projects(from, to, uid);
+  const uid = statsUid(ctx, ctx.url);
+  const items = store.repos(from, to, uid);
   const limit = util.clampInt(ctx.url.searchParams.get("limit"), 1, 500, 100);
   sendJson(res, 200, {
     ok: true,
@@ -489,52 +525,47 @@ route("GET", "/api/stats/projects", async (req, res, ctx) => {
   });
 });
 
-route("GET", "/api/stats/users", async (req, res, ctx) => {
-  const { from, to } = resolveRange(ctx.url, cfg.timezone);
-  if (!ctx.isAdmin) {
-    const items = store.users(from, to).filter((u) => u.uid === ctx.identity.uid);
-    return sendJson(res, 200, { ok: true, range: { from, to, timezone: cfg.timezone }, items });
-  }
+route("GET", "/api/stats/referrers", async (req, res, ctx) => {
+  const uid = statsUid(ctx, ctx.url);
+  const data = store.referrers(uid);
   sendJson(res, 200, {
     ok: true,
-    range: { from, to, timezone: cfg.timezone },
-    items: store.users(from, to)
+    window: "近14天（GitHub 仅提供滚动快照）",
+    updatedAt: data.updatedAt,
+    total: data.rows.length,
+    items: data.rows.slice(0, 100)
   });
 });
 
-route("GET", "/api/stats/user-projects", async (req, res, ctx) => {
-  const { from, to } = resolveRange(ctx.url, cfg.timezone);
-  const uid = ctx.isAdmin ? ctx.url.searchParams.get("uid") || null : ctx.identity.uid;
-  const limit = util.clampInt(ctx.url.searchParams.get("limit"), 1, 1000, 200);
+route("GET", "/api/stats/paths", async (req, res, ctx) => {
+  const uid = statsUid(ctx, ctx.url);
+  const data = store.paths(uid);
   sendJson(res, 200, {
     ok: true,
-    range: { from, to, timezone: cfg.timezone },
-    items: store.userProjects(from, to, uid).slice(0, limit)
-  });
-});
-
-route("GET", "/api/stats/raw", async (req, res, ctx) => {
-  const { from, to } = resolveRange(ctx.url, cfg.timezone);
-  const uid = ctx.isAdmin ? ctx.url.searchParams.get("uid") || null : ctx.identity.uid;
-  const limit = util.clampInt(ctx.url.searchParams.get("limit"), 1, 5000, 500);
-  sendJson(res, 200, {
-    ok: true,
-    range: { from, to, timezone: cfg.timezone },
-    items: store.rawEvents(from, to, uid, limit)
+    window: "近14天（GitHub 仅提供滚动快照）",
+    updatedAt: data.updatedAt,
+    total: data.rows.length,
+    items: data.rows.slice(0, 100)
   });
 });
 
 route("GET", "/api/stats/summary", async (req, res, ctx) => {
   const today = util.dayKey(Date.now(), cfg.timezone);
-  const uid = ctx.isAdmin ? null : ctx.identity.uid;
+  const uid = statsUid(ctx, ctx.url);
   const todayData = store.overview(today, today, uid);
   const week = store.overview(util.addDays(today, -6), today, uid);
+  const linkedUser = uid ? store.getUser(uid) : null;
   sendJson(res, 200, {
     ok: true,
     timezone: cfg.timezone,
+    scope: uid ? "user" : "all",
     today: { day: today, ...todayData.totals },
     week: week.totals,
-    topProjectsToday: store.projects(today, today, uid).slice(0, 5),
+    topReposToday: store.repos(today, today, uid).slice(0, 5),
+    linked: uid ? Boolean(linkedUser && linkedUser.github) : store.listUsers().some((u) => u.github),
+    hasTraffic: store.hasTraffic(uid),
+    sync: uid ? store.getSyncStatus(uid) : null,
+    syncItems: store.listSyncStatus(uid),
     stats: store.stats()
   });
 });
@@ -767,27 +798,34 @@ const server = http.createServer(async (req, res) => {
 /* ------------------------------------------------------------------ 定时任务 */
 
 const timers = [];
+const TRAFFIC_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时同步一次
 
-timers.push(
-  setInterval(() => {
-    try {
-      store.sweepIdle();
-    } catch (e) {
-      console.error("[gstats] sweep failed:", e.message);
-    }
-  }, 60000)
-);
-
+// 定时裁剪超过保留期的流量快照
 timers.push(
   setInterval(() => {
     try {
       store.purgeExpired();
-      store.persistOpenSessions();
     } catch (e) {
       console.error("[gstats] purge failed:", e.message);
     }
-  }, 10 * 60 * 1000)
+  }, 60 * 60 * 1000)
 );
+
+// GitHub Traffic 每 6 小时全量同步一次
+timers.push(
+  setInterval(() => {
+    traffic.syncAll(store).catch((e) => {
+      console.error("[gstats] scheduled traffic sync failed:", e.message);
+    });
+  }, TRAFFIC_SYNC_INTERVAL_MS)
+);
+
+// 启动 45 秒后做一次全量同步（避开开机高峰；未绑定账号会自动跳过）
+setTimeout(() => {
+  traffic.syncAll(store).catch((e) => {
+    console.error("[gstats] startup traffic sync failed:", e.message);
+  });
+}, 45 * 1000).unref();
 
 /* ------------------------------------------------------------------- 启动 */
 
@@ -795,9 +833,9 @@ function shutdown(signal) {
   console.log(`[gstats] received ${signal}, shutting down ...`);
   for (const t of timers) clearInterval(t);
   try {
-    store.finalizeAll();
+    store.persistTraffic();
   } catch (e) {
-    console.error("[gstats] finalize failed:", e.message);
+    console.error("[gstats] persist traffic failed:", e.message);
   }
   try {
     server.close();

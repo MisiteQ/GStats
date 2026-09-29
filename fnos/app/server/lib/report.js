@@ -2,6 +2,7 @@
 
 /**
  * 报表生成：CSV（带 BOM，Excel 可直接打开）、JSON 与可打印的 HTML 报告。
+ * 数据均来自 GitHub 官方 Repo Traffic API 的本地快照（外部访客统计）。
  */
 
 const fs = require("fs");
@@ -10,19 +11,17 @@ const util = require("./util");
 const config = require("./config");
 
 const REPORT_TYPES = {
-  daily: { label: "每日汇总报表", slug: "daily" },
-  users: { label: "用户明细报表", slug: "users" },
-  projects: { label: "项目热度报表", slug: "projects" },
-  user_projects: { label: "用户项目交叉报表", slug: "user-projects" },
-  raw: { label: "原始访问记录", slug: "raw" }
+  daily: { label: "每日流量报表", slug: "daily" },
+  repos: { label: "仓库流量报表", slug: "repos" },
+  referrers: { label: "来源网站报表", slug: "referrers" },
+  paths: { label: "热门路径报表", slug: "paths" }
 };
+
+// 来源/路径只有近 14 天滚动快照，不按区间过滤
+const SNAPSHOT_TYPES = new Set(["referrers", "paths"]);
 
 function ensureType(type) {
   return REPORT_TYPES[type] ? type : "daily";
-}
-
-function humanSeconds(s) {
-  return util.humanDuration(s);
 }
 
 function formatTs(ts, tz) {
@@ -32,20 +31,22 @@ function formatTs(ts, tz) {
 
 /* --------------------------------------------------------------------- 数据源 */
 
-function collect(type, { store, from, to, uid, tz }) {
+function collect(type, { store, from, to, uid }) {
   switch (ensureType(type)) {
-    case "users":
-      return { rows: store.users(from, to) };
-    case "projects":
-      return { rows: store.projects(from, to, uid) };
-    case "user_projects":
-      return { rows: store.userProjects(from, to, uid) };
-    case "raw":
-      return { rows: store.rawEvents(from, to, uid, 5000) };
+    case "repos":
+      return { rows: store.repos(from, to, uid), window: `${from} ~ ${to}` };
+    case "referrers": {
+      const data = store.referrers(uid);
+      return { rows: data.rows, updatedAt: data.updatedAt, window: "近14天" };
+    }
+    case "paths": {
+      const data = store.paths(uid);
+      return { rows: data.rows, updatedAt: data.updatedAt, window: "近14天" };
+    }
     case "daily":
     default: {
       const overview = store.overview(from, to, uid);
-      return { rows: overview.days, totals: overview.totals };
+      return { rows: overview.days, totals: overview.totals, window: `${from} ~ ${to}` };
     }
   }
 }
@@ -53,159 +54,54 @@ function collect(type, { store, from, to, uid, tz }) {
 /* ------------------------------------------------------------------------ CSV */
 
 function buildCsv(type, ctx) {
-  const tz = ctx.tz;
   const type2 = ensureType(type);
+
   if (type2 === "daily") {
     const { rows, totals } = ctx.data;
-    const headers = [
-      "日期",
-      "登录用户数",
-      "活跃用户数",
-      "授权登录次数",
-      "打开应用次数",
-      "浏览次数",
-      "涉及项目数",
-      "总停留时长(秒)",
-      "总停留时长"
-    ];
-    const body = rows.map((r) => [
-      r.day,
-      r.loginUsers,
-      r.activeUsers,
-      r.authLogins,
-      r.appOpens,
-      r.views,
-      r.projects,
-      r.seconds,
-      humanSeconds(r.seconds)
-    ]);
-    body.push([
-      "合计（去重/日均）",
-      totals.loginUsers,
-      totals.activeUsers,
-      totals.authLogins,
-      totals.appOpens,
-      totals.views,
-      totals.projects,
-      totals.seconds,
-      humanSeconds(totals.seconds)
-    ]);
-    body.push(["日均登录用户数", totals.avgDailyLoginUsers, "", "", "", "", "", "", ""]);
+    const headers = ["日期", "浏览量(PV)", "独立访客(UV,每日)", "克隆次数", "克隆者数(每日)", "有访问的仓库数"];
+    const body = rows.map((r) => [r.day, r.views, r.uniques, r.clones, r.cloneUniques, r.repos]);
+    body.push(["合计", totals.views, totals.uniques, totals.clones, totals.cloneUniques, totals.repos]);
+    body.push(["日均", totals.avgDailyViews, totals.avgDailyUniques, "", "", ""]);
     return util.toCsv(headers, body);
   }
 
-  if (type2 === "users") {
+  if (type2 === "repos") {
     const headers = [
-      "飞牛用户",
-      "用户ID",
-      "GitHub 账号",
-      "活跃天数",
-      "登录次数",
-      "打开应用次数",
-      "浏览次数",
-      "浏览项目数",
-      "总停留时长(秒)",
-      "总停留时长",
-      "首次活动",
-      "最后活动"
+      "仓库",
+      "所有者",
+      "浏览量(PV)",
+      "独立访客(UV,每日累计)",
+      "克隆次数",
+      "克隆者数",
+      "有访问天数",
+      "日均浏览量",
+      "首次有数据",
+      "最后有数据"
     ];
     const rows = ctx.data.rows.map((r) => [
-      r.fnosUser || r.uid,
-      r.uid,
-      r.githubLogin ? "@" + r.githubLogin : "未绑定",
+      r.repo,
+      r.owner,
+      r.views,
+      r.uniques,
+      r.clones,
+      r.cloneUniques,
       r.activeDays,
-      r.logins,
-      r.appOpens,
-      r.views,
-      r.projectCount,
-      r.seconds,
-      humanSeconds(r.seconds),
-      formatTs(r.firstAt, tz),
-      formatTs(r.lastAt, tz)
+      r.avgDailyViews,
+      r.firstDay,
+      r.lastDay
     ]);
     return util.toCsv(headers, rows);
   }
 
-  if (type2 === "projects") {
-    const headers = [
-      "项目",
-      "类型",
-      "显示名称",
-      "访问人数",
-      "浏览次数",
-      "总停留时长(秒)",
-      "平均停留时长(秒)",
-      "平均停留时长",
-      "访问者",
-      "首次访问",
-      "最后访问"
-    ];
-    const rows = ctx.data.rows.map((r) => [
-      r.target,
-      r.kind,
-      r.title,
-      r.users,
-      r.views,
-      r.seconds,
-      r.avgSeconds,
-      humanSeconds(r.avgSeconds),
-      (r.userList || []).join(" / "),
-      formatTs(r.firstAt, tz),
-      formatTs(r.lastAt, tz)
-    ]);
+  if (type2 === "referrers") {
+    const headers = ["来源网站", "访问量", "独立访客(跨仓库累计)", "覆盖仓库数"];
+    const rows = ctx.data.rows.map((r) => [r.referrer, r.count, r.uniques, r.repoCount]);
     return util.toCsv(headers, rows);
   }
 
-  if (type2 === "user_projects") {
-    const headers = [
-      "飞牛用户",
-      "GitHub 账号",
-      "项目",
-      "访问天数",
-      "浏览次数",
-      "总停留时长(秒)",
-      "总停留时长",
-      "平均停留时长(秒)",
-      "最后访问"
-    ];
-    const rows = ctx.data.rows.map((r) => [
-      r.fnosUser || r.uid,
-      r.githubLogin ? "@" + r.githubLogin : "",
-      r.target,
-      r.activeDays,
-      r.views,
-      r.seconds,
-      humanSeconds(r.seconds),
-      r.avgSeconds,
-      formatTs(r.lastAt, tz)
-    ]);
-    return util.toCsv(headers, rows);
-  }
-
-  const headers = [
-    "时间",
-    "日期",
-    "飞牛用户",
-    "GitHub 账号",
-    "类型",
-    "项目",
-    "标题",
-    "停留时长(秒)",
-    "开始时间",
-    "结束时间"
-  ];
-  const rows = ctx.data.rows.map((r) => [
-    formatTs(r.ts, tz),
-    r.day,
-    r.fnosUser || r.uid,
-    r.githubLogin ? "@" + r.githubLogin : "",
-    r.kind,
-    r.target,
-    r.title,
-    r.seconds,
-    formatTs(r.startedAt, tz),
-    formatTs(r.endedAt, tz)
-  ]);
+  // paths
+  const headers = ["访问路径", "页面标题", "访问量", "独立访客(跨仓库累计)", "覆盖仓库数"];
+  const rows = ctx.data.rows.map((r) => [r.path, r.title, r.count, r.uniques, r.repoCount]);
   return util.toCsv(headers, rows);
 }
 
@@ -220,7 +116,7 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function barChart(rows, valueKey, labelKey, maxItems = 14) {
+function barChart(rows, valueKey, labelKey, maxItems = 15) {
   const list = rows.slice(0, maxItems);
   if (!list.length) return '<p class="empty">暂无数据</p>';
   const max = Math.max(...list.map((r) => Number(r[valueKey]) || 0), 1);
@@ -230,40 +126,43 @@ function barChart(rows, valueKey, labelKey, maxItems = 14) {
       const pct = Math.max(1, Math.round((value / max) * 100));
       return `<div class="bar-row"><span class="bar-label" title="${escapeHtml(
         r[labelKey]
-      )}">${escapeHtml(r[labelKey])}</span><span class="bar-track"><i style="width:${pct}%"></i></span><span class="bar-value">${escapeHtml(
-        humanSeconds(value)
-      )}</span></div>`;
+      )}">${escapeHtml(r[labelKey])}</span><span class="bar-track"><i style="width:${pct}%"></i></span><span class="bar-value">${value}</span></div>`;
     })
     .join("")}</div>`;
 }
 
 function trendChart(days) {
   if (!days.length) return '<p class="empty">暂无数据</p>';
-  const max = Math.max(...days.map((d) => d.seconds), 1);
+  const max = Math.max(...days.map((d) => Math.max(d.views, d.uniques)), 1);
   const width = Math.max(560, days.length * 34);
-  const height = 160;
+  const height = 170;
   const pad = 24;
   const innerW = width - pad * 2;
   const innerH = height - pad * 2;
   const step = days.length > 1 ? innerW / (days.length - 1) : innerW;
-  const points = days.map((d, i) => {
-    const x = pad + i * step;
-    const y = pad + innerH - (d.seconds / max) * innerH;
-    return [x, y, d];
-  });
-  const line = points.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-  const area = `${pad},${pad + innerH} ${line} ${(pad + (days.length - 1) * step).toFixed(1)},${pad + innerH}`;
+  const lineOf = (key) =>
+    days
+      .map((d, i) => {
+        const x = pad + i * step;
+        const y = pad + innerH - (Math.max(0, d[key]) / max) * innerH;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  const pointsOf = (key, color, label) =>
+    days
+      .map((d, i) => {
+        const x = pad + i * step;
+        const y = pad + innerH - (Math.max(0, d[key]) / max) * innerH;
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.6" fill="${color}"><title>${escapeHtml(
+          d.day
+        )} ${label}：${d[key]}</title></circle>`;
+      })
+      .join("");
   return `<svg class="trend" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" role="img">
-  <polygon points="${area}" fill="rgba(37,99,235,0.14)"/>
-  <polyline points="${line}" fill="none" stroke="#2563eb" stroke-width="2"/>
-  ${points
-    .map(
-      (p) =>
-        `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6" fill="#2563eb"><title>${escapeHtml(
-          p[2].day
-        )}：${escapeHtml(humanSeconds(p[2].seconds))}</title></circle>`
-    )
-    .join("")}
+  <polyline points="${lineOf("views")}" fill="none" stroke="#2563eb" stroke-width="2"/>
+  <polyline points="${lineOf("uniques")}" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="5 3"/>
+  ${pointsOf("views", "#2563eb", "浏览量")}
+  ${pointsOf("uniques", "#10b981", "独立访客")}
   <text x="${pad}" y="${height - 6}" font-size="10" fill="#64748b">${escapeHtml(days[0].day)}</text>
   <text x="${width - pad}" y="${height - 6}" font-size="10" fill="#64748b" text-anchor="end">${escapeHtml(
     days[days.length - 1].day
@@ -272,86 +171,57 @@ function trendChart(days) {
 }
 
 function buildHtml(ctx) {
-  const { type, from, to, tz, generatedAt, scopeLabel, store } = ctx;
+  const { type, from, to, tz, generatedAt, scopeLabel, store, uid } = ctx;
   const type2 = ensureType(type);
-  const overview = store.overview(from, to, ctx.uid);
-  const projects = store.projects(from, to, ctx.uid).slice(0, 15);
-  const users = store.users(from, to).slice(0, 30);
+  const overview = store.overview(from, to, uid);
+  const repos = store.repos(from, to, uid).slice(0, 15);
 
   const cards = [
-    { label: "登录用户数", value: overview.totals.loginUsers, unit: "人" },
-    { label: "活跃用户数", value: overview.totals.activeUsers, unit: "人" },
-    { label: "日均登录用户", value: overview.totals.avgDailyLoginUsers, unit: "人/天" },
-    { label: "授权登录次数", value: overview.totals.authLogins, unit: "次" },
-    { label: "浏览次数", value: overview.totals.views, unit: "次" },
-    { label: "涉及项目", value: overview.totals.projects, unit: "个" },
-    { label: "总停留时长", value: humanSeconds(overview.totals.seconds), unit: "" },
-    { label: "平均单次停留", value: humanSeconds(overview.totals.avgSecondsPerView), unit: "" }
+    { label: "总浏览量(PV)", value: overview.totals.views, unit: "次" },
+    { label: "独立访客(每日UV累计)", value: overview.totals.uniques, unit: "人" },
+    { label: "日均浏览量", value: overview.totals.avgDailyViews, unit: "次/天" },
+    { label: "克隆次数", value: overview.totals.clones, unit: "次" },
+    { label: "有访问的仓库", value: overview.totals.repos, unit: "个" },
+    { label: "平均每仓浏览量", value: overview.totals.avgViewsPerRepo, unit: "次" }
   ];
 
   const tableOf = () => {
     const data = ctx.data;
     if (type2 === "daily") {
-      return `<table><thead><tr><th>日期</th><th>登录用户</th><th>活跃用户</th><th>授权登录次数</th><th>浏览次数</th><th>项目数</th><th>停留时长</th></tr></thead><tbody>${data.rows
+      return `<table><thead><tr><th>日期</th><th>浏览量(PV)</th><th>独立访客</th><th>克隆次数</th><th>克隆者数</th><th>仓库数</th></tr></thead><tbody>${data.rows
         .map(
           (r) =>
-            `<tr><td>${escapeHtml(r.day)}</td><td>${r.loginUsers}</td><td>${r.activeUsers}</td><td>${r.authLogins}</td><td>${r.views}</td><td>${r.projects}</td><td>${escapeHtml(
-              humanSeconds(r.seconds)
-            )}</td></tr>`
+            `<tr><td>${escapeHtml(r.day)}</td><td>${r.views}</td><td>${r.uniques}</td><td>${r.clones}</td><td>${r.cloneUniques}</td><td>${r.repos}</td></tr>`
         )
         .join("")}</tbody></table>`;
     }
-    if (type2 === "users") {
-      return `<table><thead><tr><th>用户</th><th>GitHub</th><th>活跃天数</th><th>登录次数</th><th>浏览次数</th><th>项目数</th><th>停留时长</th><th>最后活动</th></tr></thead><tbody>${data.rows
+    if (type2 === "repos") {
+      return `<table><thead><tr><th>仓库</th><th>浏览量</th><th>独立访客(每日累计)</th><th>克隆次数</th><th>有访问天数</th><th>日均浏览</th></tr></thead><tbody>${data.rows
         .map(
           (r) =>
-            `<tr><td>${escapeHtml(r.fnosUser || r.uid)}</td><td>${
-              r.githubLogin ? "@" + escapeHtml(r.githubLogin) : "未绑定"
-            }</td><td>${r.activeDays}</td><td>${r.logins}</td><td>${r.views}</td><td>${
-              r.projectCount
-            }</td><td>${escapeHtml(humanSeconds(r.seconds))}</td><td>${escapeHtml(
-              formatTs(r.lastAt, tz)
-            )}</td></tr>`
+            `<tr><td><code>${escapeHtml(r.repo)}</code></td><td>${r.views}</td><td>${r.uniques}</td><td>${r.clones}</td><td>${r.activeDays}</td><td>${r.avgDailyViews}</td></tr>`
         )
         .join("")}</tbody></table>`;
     }
-    if (type2 === "projects") {
-      return `<table><thead><tr><th>项目</th><th>访问人数</th><th>浏览次数</th><th>总时长</th><th>平均时长</th><th>最后访问</th></tr></thead><tbody>${data.rows
+    if (type2 === "referrers") {
+      return `<table><thead><tr><th>来源网站</th><th>访问量</th><th>独立访客</th><th>覆盖仓库数</th></tr></thead><tbody>${data.rows
         .map(
           (r) =>
-            `<tr><td><code>${escapeHtml(r.target)}</code></td><td>${r.users}</td><td>${r.views}</td><td>${escapeHtml(
-              humanSeconds(r.seconds)
-            )}</td><td>${escapeHtml(humanSeconds(r.avgSeconds))}</td><td>${escapeHtml(
-              formatTs(r.lastAt, tz)
-            )}</td></tr>`
+            `<tr><td>${escapeHtml(r.referrer)}</td><td>${r.count}</td><td>${r.uniques}</td><td>${r.repoCount}</td></tr>`
         )
         .join("")}</tbody></table>`;
     }
-    if (type2 === "user_projects") {
-      return `<table><thead><tr><th>用户</th><th>GitHub</th><th>项目</th><th>访问天数</th><th>浏览次数</th><th>总时长</th><th>平均时长</th></tr></thead><tbody>${data.rows
-        .map(
-          (r) =>
-            `<tr><td>${escapeHtml(r.fnosUser || r.uid)}</td><td>${
-              r.githubLogin ? "@" + escapeHtml(r.githubLogin) : ""
-            }</td><td><code>${escapeHtml(r.target)}</code></td><td>${r.activeDays}</td><td>${
-              r.views
-            }</td><td>${escapeHtml(humanSeconds(r.seconds))}</td><td>${escapeHtml(
-              humanSeconds(r.avgSeconds)
-            )}</td></tr>`
-        )
-        .join("")}</tbody></table>`;
-    }
-    return `<table><thead><tr><th>时间</th><th>用户</th><th>GitHub</th><th>项目</th><th>停留时长</th></tr></thead><tbody>${data.rows
+    return `<table><thead><tr><th>访问路径</th><th>页面标题</th><th>访问量</th><th>独立访客</th><th>覆盖仓库数</th></tr></thead><tbody>${data.rows
       .map(
         (r) =>
-          `<tr><td>${escapeHtml(formatTs(r.ts, tz))}</td><td>${escapeHtml(
-            r.fnosUser || r.uid
-          )}</td><td>${r.githubLogin ? "@" + escapeHtml(r.githubLogin) : ""}</td><td><code>${escapeHtml(
-            r.target
-          )}</code></td><td>${escapeHtml(humanSeconds(r.seconds))}</td></tr>`
+          `<tr><td><code>${escapeHtml(r.path)}</code></td><td>${escapeHtml(r.title)}</td><td>${r.count}</td><td>${r.uniques}</td><td>${r.repoCount}</td></tr>`
       )
       .join("")}</tbody></table>`;
   };
+
+  const windowNote = SNAPSHOT_TYPES.has(type2)
+    ? "<b>数据窗口：近 14 天</b>（GitHub 官方仅提供滚动快照，不支持自定义区间）<br/>"
+    : "";
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -369,7 +239,7 @@ function buildHtml(ctx) {
   h1 { font-size: 22px; margin: 0 0 6px; }
   h2 { font-size: 15px; margin: 30px 0 12px; color: #334155; }
   .meta { color: #64748b; font-size: 13px; line-height: 1.7; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 20px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 20px; }
   .card { background: #fff; border: 1px solid #e5e9f0; border-radius: 12px; padding: 14px 16px; }
   .card .k { font-size: 12px; color: #64748b; }
   .card .v { font-size: 22px; font-weight: 600; margin-top: 6px; }
@@ -382,12 +252,14 @@ function buildHtml(ctx) {
   code { background: #f1f5f9; padding: 2px 6px; border-radius: 5px; font-size: 12px; }
   .trend { width: 100%; height: auto; }
   .bars { display: flex; flex-direction: column; gap: 8px; }
-  .bar-row { display: grid; grid-template-columns: minmax(140px, 240px) 1fr 96px; align-items: center; gap: 10px; font-size: 13px; }
+  .bar-row { display: grid; grid-template-columns: minmax(180px, 320px) 1fr 72px; align-items: center; gap: 10px; font-size: 13px; }
   .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bar-track { background: #eef2f7; border-radius: 99px; height: 10px; overflow: hidden; }
   .bar-track i { display: block; height: 100%; background: linear-gradient(90deg, #2563eb, #38bdf8); border-radius: 99px; }
   .bar-value { text-align: right; color: #475569; }
   .empty { color: #94a3b8; font-size: 13px; }
+  .legend { font-size: 12px; color: #64748b; margin-top: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 5px 0 10px; }
   footer { margin-top: 28px; color: #94a3b8; font-size: 12px; text-align: center; }
   @media print { body { background: #fff; padding: 0; } .panel, .card { break-inside: avoid; } }
 </style>
@@ -400,7 +272,8 @@ function buildHtml(ctx) {
       <div class="meta">
         统计区间：${escapeHtml(from)} ~ ${escapeHtml(to)}（时区 ${escapeHtml(tz)}）<br/>
         统计范围：${escapeHtml(scopeLabel)}<br/>
-        生成时间：${escapeHtml(formatTs(generatedAt, tz))} · 由 GStats 自动生成
+        ${windowNote}
+        生成时间：${escapeHtml(formatTs(generatedAt, tz))} · 数据来源：GitHub Repo Traffic API
       </div>
     </div>
   </header>
@@ -416,14 +289,17 @@ function buildHtml(ctx) {
       .join("")}
   </div>
 
-  <h2>每日停留时长趋势</h2>
-  <div class="panel">${trendChart(overview.days)}</div>
+  ${
+    SNAPSHOT_TYPES.has(type2)
+      ? ""
+      : `<h2>每日流量趋势</h2>
+  <div class="panel">${trendChart(overview.days)}
+    <div class="legend"><span><i style="background:#2563eb"></i>浏览量(PV)</span><span><i style="background:#10b981"></i>独立访客(每日UV)</span></div>
+  </div>
 
-  <h2>项目停留时长排行</h2>
-  <div class="panel">${barChart(projects, "seconds", "target")}</div>
-
-  <h2>用户停留时长排行</h2>
-  <div class="panel">${barChart(users, "seconds", "fnosUser")}</div>
+  <h2>仓库浏览量排行</h2>
+  <div class="panel">${barChart(repos, "views", "repo")}</div>`
+  }
 
   <h2>${escapeHtml(REPORT_TYPES[type2].label)}明细</h2>
   <div class="panel">${tableOf()}</div>
@@ -440,7 +316,7 @@ function buildHtml(ctx) {
 function build({ type, store, from, to, uid, format, scopeLabel }) {
   const tz = store.tz;
   const type2 = ensureType(type);
-  const data = collect(type2, { store, from, to, uid, tz });
+  const data = collect(type2, { store, from, to, uid });
   const ctx = {
     type: type2,
     from,
@@ -449,10 +325,10 @@ function build({ type, store, from, to, uid, format, scopeLabel }) {
     uid,
     data,
     store,
-    scopeLabel: scopeLabel || "全部用户",
+    scopeLabel: scopeLabel || "全部账号",
     generatedAt: Date.now()
   };
-  const stamp = `${from}_${to}`;
+  const stamp = SNAPSHOT_TYPES.has(type2) ? "last14d" : `${from}_${to}`;
 
   if (format === "json") {
     return {
@@ -463,10 +339,12 @@ function build({ type, store, from, to, uid, format, scopeLabel }) {
           app: "GStats",
           type: type2,
           label: REPORT_TYPES[type2].label,
-          range: { from, to, timezone: tz },
+          source: "GitHub Repo Traffic API",
+          range: { from, to, timezone: tz, window: data.window },
           scope: ctx.scopeLabel,
           generatedAt: util.isoDate(ctx.generatedAt),
-          summary: store.overview(from, to, uid).totals,
+          snapshotUpdatedAt: data.updatedAt || null,
+          summary: SNAPSHOT_TYPES.has(type2) ? undefined : store.overview(from, to, uid).totals,
           rows: data.rows
         },
         null,
